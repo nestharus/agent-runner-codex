@@ -16,12 +16,12 @@ import threading
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path('target/debug/agent-runner-codex'))
-    parser.add_argument('--label', choices=['codex-gpt-'+e for e in ['low','medium','high','xhigh','max']]+['codex-exec-bench'], default='codex-gpt-high')
+    parser.add_argument('--label', choices=[prefix+e for prefix in ['gpt-', 'codex-gpt-'] for e in ['low','medium','high','xhigh','max']]+['codex-exec-bench'], default='gpt-high')
     parser.add_argument('--positive-control', action='store_true', help='Remove user-config isolation and prove the injected project MCP appears')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     model = 'gpt-5.6-luna' if args.label == 'codex-exec-bench' else 'gpt-6-astra'
-    effort = 'low' if args.label == 'codex-exec-bench' else args.label.removeprefix('codex-gpt-')
+    effort = 'low' if args.label == 'codex-exec-bench' else args.label.rsplit('-', 1)[-1]
     route_args = ['-m', model, '-c', 'model_reasoning_effort='+json.dumps(effort)]
     captured = []
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -103,7 +103,7 @@ def main():
             instructions = Path(runtime['system_prompt_file']).read_text().rstrip()
             texts = [''.join(c.get('text','') for c in i.get('content',[]) if isinstance(c,dict)) for i in body.get('input',[]) if i.get('role')=='developer' and isinstance(i.get('content'),list)]
             assert instructions in texts or body.get('instructions','').rstrip()==instructions, 'System instruction source differs'
-            print(json.dumps({'passed': True, 'model': body.get('model'), 'tools': names, 'system_prompt_exact': True}, indent=2))
+            print(json.dumps({'passed': True, 'label': args.label, 'model': body.get('model'), 'effort': wire_effort, 'tools': names, 'system_prompt_exact': True}, indent=2))
     finally:
         server.shutdown()
 

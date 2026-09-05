@@ -7,7 +7,9 @@ pub fn route(name: &str) -> Option<(&'static str, &'static str)> {
     if name == BENCH {
         return Some(("gpt-5.6-luna", "low"));
     }
-    let effort = name.strip_prefix("codex-gpt-")?;
+    let effort = name
+        .strip_prefix("codex-gpt-")
+        .or_else(|| name.strip_prefix("gpt-"))?;
     EFFORTS
         .iter()
         .find(|value| **value == effort)
@@ -24,11 +26,13 @@ pub fn args(model: &str, effort: &str) -> Vec<String> {
 }
 
 pub fn catalog() -> Vec<Value> {
-    EFFORTS
-        .iter()
-        .map(|effort| {
-            json!({"name": format!("codex-gpt-{effort}"), "provider_model": ASTRA,
-               "provider_args": args(ASTRA, effort), "eligible_accounts": crate::account::ACCOUNTS})
+    ["gpt-", "codex-gpt-"]
+        .into_iter()
+        .flat_map(|prefix| {
+            EFFORTS.iter().map(move |effort| {
+                json!({"name": format!("{prefix}{effort}"), "provider_model": ASTRA,
+                   "provider_args": args(ASTRA, effort), "eligible_accounts": crate::account::ACCOUNTS})
+            })
         })
         .collect()
 }

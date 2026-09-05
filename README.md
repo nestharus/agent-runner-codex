@@ -11,10 +11,10 @@ Codex-specific launch and rollout handling replace OpenCode's native boundaries.
 
 ## Models and accounts
 
-`codex-gpt-low`, `codex-gpt-medium`, `codex-gpt-high`, `codex-gpt-xhigh`,
-and `codex-gpt-max` select `gpt-6-astra` with the corresponding
-native reasoning effort. Existing OpenCode labels are preserved. Native sub-agent
-delegation remains disabled for every label.
+`gpt-low`, `gpt-medium`, `gpt-high`, `gpt-xhigh`, and `gpt-max` select
+`gpt-6-astra` with the corresponding native reasoning effort. The temporary
+`codex-gpt-*` names remain equivalent aliases. Native sub-agent delegation
+remains disabled for every label.
 
 Quota probing uses the installed `~/.local/bin/chatgpt-usage` adapter against
 each selected native auth file. Standalone authentication refresh is unsupported;
@@ -105,9 +105,19 @@ python3 scripts/install-labels.py --stage-root /tmp/agent-runner-codex-labels --
 agents -m codex-gpt-high -p /path/to/project 'Your task'
 ```
 
-The label installer preserves existing OpenCode labels and backs up the provider
-configuration before changing Codex implementation paths and assigning canonical
-account settings IDs.
+The default label installer preserves existing standard labels and backs up the
+provider configuration before changing Codex implementation paths and assigning
+canonical account settings IDs. To move the five standard `gpt-*` labels to
+Codex Astra after validating the provider, stage and apply the promotion:
+
+```sh
+python3 scripts/install-labels.py --standard-labels --stage-root /tmp/agent-runner-astra-labels
+python3 scripts/install-labels.py --standard-labels --stage-root /tmp/agent-runner-astra-labels --apply
+agents -m gpt-high -p /path/to/project 'Your task'
+```
+
+Promotion backs up the five previous route files. Both label families use the
+same Codex accounts, system prompt, and Bash tool configuration.
 
 `examples/benchmark-models/codex-exec-bench.toml` is a separately named
 `gpt-5.6-luna`/`low` live-test route. Use it in isolated runner configuration; the

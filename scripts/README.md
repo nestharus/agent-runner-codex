@@ -41,6 +41,7 @@ reasoning effort, and the five existing accounts `codex` through `codex5`.
 Both headless and interactive model arguments are included. `providers.patch`
 shows the five account implementation executable changes and canonical
 `settings_id` fields required by the active runner's account routing.
+`models.patch` shows each proposed model file change.
 
 After installing and validating the provider binary and its runtime config,
 apply those changes with:
@@ -56,8 +57,29 @@ The installer backs up `providers.toml` under the configuration root's
 `backups/` directory and changes only the five Codex implementation paths and
 their canonical account settings IDs. Existing different settings IDs are
 rejected for review.
-Existing OpenCode labels and the default provider stay unchanged. A differing
-existing `codex-gpt-*` label causes an error before installation.
+In the default temporary-label mode, existing OpenCode labels and the default
+provider stay unchanged. A differing existing `codex-gpt-*` label causes an
+error before installation.
+
+To promote the standard `gpt-low`, `gpt-medium`, `gpt-high`, `gpt-xhigh`, and
+`gpt-max` names to Codex Astra, stage and apply with the explicit standard-label
+mode:
+
+```bash
+python3 scripts/install-labels.py --standard-labels \
+  --stage-root /tmp/codex-standard-labels
+python3 scripts/install-labels.py --standard-labels \
+  --stage-root /tmp/codex-standard-labels --apply
+```
+
+Review `models.patch` before applying. This mode replaces those five existing
+model files and saves their previous contents under `backups/codex-astra-*/models/`
+alongside the provider configuration backup. It preserves the temporary
+`codex-gpt-*` aliases, other model labels, and the configured default provider.
+Before either mode applies any routing changes, the installed provider must
+advertise every target label with the exact Astra model, reasoning arguments,
+and all five eligible accounts. Install the updated provider first when
+promoting the standard labels.
 
 `benchmark-models/codex-exec-bench.toml` is generated separately and never
 installed into production routing. It uses `gpt-5.6-luna` at low reasoning for

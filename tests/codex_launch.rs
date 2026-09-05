@@ -68,6 +68,44 @@ for event in [{'type':'thread.started','thread_id':'11111111-2222-3333-4444-5555
     }
 }
 #[test]
+fn standard_labels_launch_the_same_astra_configuration_as_temporary_aliases() {
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        let f = Fixture::new();
+        let model_args = json!([
+            "-m",
+            "gpt-6-astra",
+            "-c",
+            format!("model_reasoning_effort=\"{effort}\"")
+        ]);
+        for prefix in ["codex-gpt-", "gpt-"] {
+            let mut request = f.request.clone();
+            request["request_id"] = json!(format!("{prefix}{effort}"));
+            request["params"]["model"]["name"] = json!(format!("{prefix}{effort}"));
+            request["params"]["model"]["provider_args"] = model_args.clone();
+            let mut argv = vec![
+                json!("codex2"),
+                json!("exec"),
+                json!("--dangerously-bypass-approvals-and-sandbox"),
+            ];
+            argv.extend(model_args.as_array().unwrap().iter().cloned());
+            request["params"]["argv"] = json!(argv);
+            let (code, events) = f.invoke("launch", &request);
+            assert_eq!(code, 0, "{prefix}{effort}: {events:?}");
+        }
+        let calls: Vec<Value> = fs::read_to_string(f.root.path().join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0], calls[1],
+            "Native configuration changed between aliases for {effort}"
+        );
+    }
+}
+
+#[test]
 fn native_launch_preserves_environment_pins_account_and_publishes_real_completion() {
     let f = Fixture::new();
     let (code, events) = f.invoke("launch", &f.request);

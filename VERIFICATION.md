@@ -2,11 +2,13 @@
 
 Validated the installed release against Codex CLI **0.153.4**.
 
-- `cargo test`: **52 passed**, covering provider schemas, launch completion
-  receipts, cancellation, large output, replay, quota, native sessions, and paging.
+- `cargo test`: **53 passed**, covering provider schemas, launch completion
+  receipts, cancellation, large output, replay, quota, native sessions, paging,
+  and identical native launches for standard and temporary model aliases.
 - `python3 integrations/codex/test_mcp.py`: **8 passed**, including the unchanged
   Bash implementation, child dispatch, environment propagation, and cancellation.
-- Native inventory checks passed for all five Astra efforts and the isolated
+- Native inventory checks passed for all five Astra efforts under both the
+  standard `gpt-*` and temporary `codex-gpt-*` labels, plus the isolated
   Luna benchmark using a local Responses stub. The configured system instruction
   text matched `~/ai/AGENTS.md` after Codex's trailing whitespace normalization.
   Agent Bash was the only execution tool. Four native helpers remained for user

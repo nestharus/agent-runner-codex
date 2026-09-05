@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage or apply the temporary Astra labels without rewriting other models."""
+"""Stage or apply Codex Astra labels, optionally promoting the standard GPT names."""
 
 import argparse
 from datetime import datetime, timezone
@@ -8,7 +8,9 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tomllib
+import uuid
 
 
 ACCOUNTS = ("codex", "codex2", "codex3", "codex4", "codex5")
@@ -76,11 +78,52 @@ def atomic_write(path, text):
     pending.replace(path)
 
 
+def verify_provider_models(provider_path, config_root, models):
+    request_id = f"label-installer-{uuid.uuid4()}"
+    request = {
+        "contract": "oulipoly.provider/v1",
+        "request_id": request_id,
+        "host": {"app": "label-installer", "config_root": str(config_root.absolute())},
+        "params": {},
+    }
+    try:
+        completed = subprocess.run(
+            [str(provider_path), "discovery.models"], input=json.dumps(request),
+            capture_output=True, text=True, timeout=15,
+        )
+        response = json.loads(completed.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise SystemExit("Installed provider model discovery failed; install and validate the current provider before applying labels") from error
+    if (completed.returncode != 0 or not isinstance(response, dict)
+            or response.get("contract") != request["contract"]
+            or response.get("request_id") != request_id or response.get("ok") is not True):
+        raise SystemExit("Installed provider did not return successful model discovery")
+    result = response.get("result")
+    catalog = result.get("models") if isinstance(result, dict) else None
+    if not isinstance(catalog, list):
+        raise SystemExit("Installed provider returned an invalid model catalog")
+    for filename, text in models.items():
+        name = Path(filename).stem
+        matches = [entry for entry in catalog if isinstance(entry, dict) and entry.get("name") == name]
+        expected = tomllib.loads(text)["providers"]
+        if len(matches) != 1:
+            raise SystemExit(f"Installed provider must advertise exactly one {name} route before applying labels")
+        entry = matches[0]
+        accounts = entry.get("eligible_accounts")
+        if (entry.get("provider_model") != "gpt-6-astra"
+                or any(entry.get("provider_args") != provider["args"]
+                       or entry.get("provider_args") != provider["interactive_args"] for provider in expected)
+                or not isinstance(accounts, list)
+                or any(provider["name"] not in accounts for provider in expected)):
+            raise SystemExit(f"Installed provider's {name} model, arguments, or eligible accounts do not match the proposed label")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-root", type=Path, default=Path.home()/".config/oulipoly-agent-runner")
     parser.add_argument("--stage-root", type=Path, required=True, help="Directory for reviewable labels and provider diff")
     parser.add_argument("--provider-path", type=Path, help="Installed provider binary; defaults to CONFIG_ROOT/agent-runner-codex/agent-runner-codex")
+    parser.add_argument("--standard-labels", action="store_true", help="Promote gpt-low/medium/high/xhigh/max to Codex Astra, backing up and replacing existing labels")
     parser.add_argument("--apply", action="store_true", help="Install after the Codex provider binary has been validated")
     args = parser.parse_args()
     provider_path = (args.provider_path or args.config_root/"agent-runner-codex/agent-runner-codex").expanduser().absolute()
@@ -95,11 +138,20 @@ def main():
         original.splitlines(keepends=True), proposed.splitlines(keepends=True),
         fromfile=str(providers_file), tofile=str(providers_file),
     )))
-    models = {f"codex-gpt-{effort}.toml":model_text(effort, provider_path) for effort in EFFORTS}
+    prefix = "gpt" if args.standard_labels else "codex-gpt"
+    models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path) for effort in EFFORTS}
+    model_diffs = []
     for name, text in models.items():
         parsed = tomllib.loads(text)
         assert [entry["name"] for entry in parsed["providers"]] == list(ACCOUNTS)
         (models_stage/name).write_text(text)
+        existing = args.config_root/"models"/name
+        old_text = existing.read_text() if existing.exists() else ""
+        model_diffs.extend(difflib.unified_diff(
+            old_text.splitlines(keepends=True), text.splitlines(keepends=True),
+            fromfile=str(existing) if existing.exists() else "/dev/null", tofile=str(existing),
+        ))
+    (args.stage_root/"models.patch").write_text("".join(model_diffs))
     benchmarks_stage = args.stage_root/"benchmark-models"
     benchmarks_stage.mkdir(exist_ok=True)
     (benchmarks_stage/"codex-exec-bench.toml").write_text(model_text("low", provider_path, "gpt-5.6-luna"))
@@ -108,12 +160,18 @@ def main():
             raise SystemExit(f"Codex provider is not installed at {provider_path}")
         for name, text in models.items():
             destination = args.config_root/"models"/name
-            if destination.exists() and destination.read_text() != text:
+            if not args.standard_labels and destination.exists() and destination.read_text() != text:
                 raise SystemExit(f"Refusing to replace different existing label {destination}")
+        verify_provider_models(provider_path, args.config_root, models)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         backup = args.config_root/"backups"/f"codex-astra-{stamp}"
         backup.mkdir(parents=True)
         shutil.copy2(providers_file, backup/"providers.toml")
+        (backup/"models").mkdir()
+        for name in models:
+            existing = args.config_root/"models"/name
+            if existing.exists():
+                shutil.copy2(existing, backup/"models"/name)
         atomic_write(providers_file, proposed)
         for name, text in models.items():
             atomic_write(args.config_root/"models"/name, text)
