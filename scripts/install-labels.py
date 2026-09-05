@@ -36,7 +36,7 @@ type = "string"
     )
 
 
-def update_providers(original, provider_path):
+def update_providers(original, provider_path, config_root):
     before = tomllib.loads(original)
     updated = original
     for account in ACCOUNTS:
@@ -48,6 +48,32 @@ def update_providers(original, provider_path):
             if updated.count(header) != 1:
                 raise ValueError(f"Expected one account section for {account}")
             updated = updated.replace(header, header + f'settings_id = "{account}"\n', 1)
+        # The runner owns the PTY, while the provider owns Codex's native tool
+        # and instruction setup. Headless calls still use the JSON endpoint.
+        account_pattern = re.compile(rf"(?m)^\[{re.escape(account)}\]\n(?:(?!^\[).|\n)*")
+        account_match = account_pattern.search(updated)
+        if account_match is None:
+            raise ValueError(f"Expected one account section for {account}")
+        account_block = account_match.group(0)
+        for key, value in {
+            "command": json.dumps(str(provider_path)) if any(c.isspace() for c in str(provider_path)) else str(provider_path),
+            "interactive_args": ["interactive", "--settings-id", account,
+                                 "--config-root", str(config_root)],
+        }.items():
+            pattern = rf'(?m)^{key}\s*=.*$'
+            replacement = f'{key} = {json.dumps(value)}'
+            if re.search(pattern, account_block):
+                account_block = re.sub(pattern, lambda _: replacement, account_block)
+            else:
+                account_block += replacement + "\n"
+        updated = updated[:account_match.start()] + account_block + updated[account_match.end():]
+        resume_pattern = re.compile(rf"(?m)^\[{re.escape(account)}\.resume\]\n(?:(?!^\[).|\n)*")
+        resume_block = f'[{account}.resume]\nkind = "flag"\nflag = "--resume"\n\n'
+        resume_match = resume_pattern.search(updated)
+        if resume_match:
+            updated = updated[:resume_match.start()] + resume_block + updated[resume_match.end():]
+        else:
+            updated += "\n" + resume_block
         block_pattern = re.compile(
             rf"(?m)^\[{re.escape(account)}\.implementation\]\n(?:(?!^\[).|\n)*"
         )
@@ -57,7 +83,7 @@ def update_providers(original, provider_path):
         match = matches[0]
         replacement, count = re.subn(
             r'(?m)^executable\s*=.*$',
-            f'executable = {json.dumps(str(provider_path))}',
+            lambda _: f'executable = {json.dumps(str(provider_path))}',
             match.group(0),
         )
         if count != 1:
@@ -68,6 +94,10 @@ def update_providers(original, provider_path):
     for account in ACCOUNTS:
         expected[account]["settings_id"] = account
         expected[account]["implementation"]["executable"] = str(provider_path)
+        expected[account]["command"] = json.dumps(str(provider_path)) if any(c.isspace() for c in str(provider_path)) else str(provider_path)
+        expected[account]["interactive_args"] = ["interactive", "--settings-id", account,
+                                                "--config-root", str(config_root)]
+        expected[account]["resume"] = {"kind": "flag", "flag": "--resume"}
     assert after == expected, "Unexpected provider configuration edit"
     assert before.keys() == after.keys()
     return updated
@@ -119,6 +149,17 @@ def verify_provider_models(provider_path, config_root, models):
             raise SystemExit(f"Installed provider's {name} model, arguments, or eligible accounts do not match the proposed label")
 
 
+def verify_interactive_launcher(provider_path):
+    try:
+        result = subprocess.run([str(provider_path), "interactive", "--help"], input="",
+                                capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SystemExit("Managed Codex PTY launcher is unavailable; install the current provider first") from error
+    if result.returncode != 0 or not all(token in result.stdout for token in
+                                        ("agent-runner-codex interactive", "--settings-id", "--resume")):
+        raise SystemExit("Managed Codex PTY launcher is unavailable; install the current provider first")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-root", type=Path, default=Path.home()/".config/oulipoly-agent-runner")
@@ -135,7 +176,7 @@ def main():
     models_stage.mkdir(exist_ok=True)
     providers_file = args.config_root/"providers.toml"
     original = providers_file.read_text()
-    proposed = update_providers(original, provider_path)
+    proposed = update_providers(original, provider_path, args.config_root.expanduser().absolute())
     (args.stage_root/"providers.toml.proposed").write_text(proposed)
     (args.stage_root/"providers.patch").write_text("".join(difflib.unified_diff(
         original.splitlines(keepends=True), proposed.splitlines(keepends=True),
@@ -168,6 +209,7 @@ def main():
             if not (args.standard_labels or args.luna_labels) and destination.exists() and destination.read_text() != text:
                 raise SystemExit(f"Refusing to replace different existing label {destination}")
         verify_provider_models(provider_path, args.config_root, models)
+        verify_interactive_launcher(provider_path)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         family = "luna" if args.luna_labels else "astra"
         backup = args.config_root/"backups"/f"codex-{family}-{stamp}"
@@ -183,7 +225,7 @@ def main():
             atomic_write(args.config_root/"models"/name, text)
         print(f"Installed {len(models)} labels; provider configuration backup: {backup}")
     else:
-        print(f"Staged {len(models)} labels and five Codex account settings/implementation changes at {args.stage_root}")
+        print(f"Staged {len(models)} labels and five Codex account settings, implementation, and PTY routes at {args.stage_root}")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,8 @@ explicit additions. Credentials stay in their existing native account homes.
 ## Native execution and tools
 
 The adapter is pinned to **Codex CLI 0.153.4**, using stable
-`codex exec --json` and `codex exec resume`. An unverified CLI version is rejected
+`codex exec --json`, `codex exec resume`, and the interactive Codex CLI inside
+Agent Runner's PTY. An unverified CLI version is rejected
 before model execution. It does not depend on app-server dynamic tools.
 
 A pinned model catalog removes metadata-forced native tools in addition to the
@@ -54,7 +55,30 @@ it does not maintain a second shell implementation. The provenance manifest and
 integration tests record the exact source and installed-byte comparison. MCP
 receives inherited environment variable names via `env_vars`, avoiding values in
 command arguments. The native thread ID is handed to the tool through a private
-per-invocation session file.
+per-invocation session file for headless launches. PTY launches use Codex's
+`tools/call` metadata `_meta.threadId`; the unchanged Bash override reports that
+identity through the runner's authenticated live-session handshake before
+dispatching work. Neither path guesses the latest transcript.
+
+The provider's `interactive` launcher applies the same managed tool inventory
+and system instructions to PTY sessions. Account `system_prompt_override` is
+read from `providers.toml` and passed as developer instructions. The runner
+retains terminal rendering, input, process ownership, and notification delivery.
+The Bash bridge preserves interactive delivery and cancellation behavior even
+though MCP itself uses pipes. Sessionless launches default to `gpt-xhigh`;
+model labels explicitly select their own model and effort.
+
+Codex's interactive CLI does not support the exec-only user-configuration
+isolation flags. Managed PTY launches therefore use a private configuration
+home under the owning account's `agent-runner-managed/tui/`, with links to its
+existing authentication, sessions, archived sessions, and thread writer locks.
+Native SQLite stays with that account. Credentials are not copied, and token
+refresh writes through to the native auth file. The small configuration homes
+are retained because native SQLite records rollout paths through them.
+Project configuration is excluded from managed launches. Managed PTY support
+currently requires Unix; unsupported platforms are rejected explicitly.
+The tested native account layout uses file authentication and account-local
+SQLite. Custom keyring or storage layouts have not been verified.
 
 ## Lifecycle and sessions
 
@@ -140,3 +164,16 @@ production label installer does not activate benchmark routes.
 `python3 scripts/verify-live.py --account codex3 --run` checks a real Bash call
 and same-session resume in an isolated runner. See [scripts/README.md](scripts/README.md)
 for staging, backups, and verification options.
+
+`python3 scripts/verify-pty-live.py --run --account codex3 --runner /path/to/runner
+--provider /path/to/agent-runner-codex` tests a real runner PTY with a Luna/low
+parent and child. It requires automatic session binding, actual managed Bash
+calls, a notification user turn in the native transcript, and an assistant
+receipt containing the child's result. A database delivery flag alone cannot
+pass this check.
+
+The label installer also routes the five accounts' interactive commands through
+the provider launcher and sets the matching resume flag. Existing managed labels
+with the older native model-selection arguments remain accepted. Installing an
+updated provider and routing affects new PTY launches; an already-running Codex
+session keeps the tool inventory with which it started.

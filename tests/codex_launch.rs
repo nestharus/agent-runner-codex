@@ -394,6 +394,169 @@ fn non_utf8_inherited_environment_reaches_native_without_provider_panic() {
 }
 
 #[test]
+fn headless_child_drops_inherited_tui_mode_and_uses_its_private_identity_file() {
+    use std::io::Write;
+    let f = Fixture::new();
+    fake_native(
+        &f,
+        r#"sys.stdin.read()
+assert 'AGENT_RUNNER_CODEX_INTERACTIVE' not in os.environ
+assert 'AGENT_RUNNER_CODEX_SESSION_BINDING' not in os.environ
+assert 'AGENT_RUNNER_CODEX_SESSION_ID' not in os.environ
+assert os.environ['AGENT_RUNNER_CODEX_SESSION_FILE'] != '/stale/parent/session'
+print(json.dumps({'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'}),flush=True)
+print(json.dumps({'type':'turn.completed'}),flush=True)"#,
+    );
+    let mut request = f.request.clone();
+    // Exercise both the native inherited environment and request overlay.
+    for key in [
+        "AGENT_RUNNER_CODEX_INTERACTIVE",
+        "AGENT_RUNNER_CODEX_SESSION_BINDING",
+    ] {
+        request["host"]["env"][key] = json!("stale-tui-mode");
+    }
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"))
+        .arg("launch")
+        .env("AGENT_RUNNER_CODEX_INTERACTIVE", "1")
+        .env("AGENT_RUNNER_CODEX_SESSION_BINDING", "tool_metadata")
+        .env(
+            "AGENT_RUNNER_CODEX_SESSION_ID",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+        .env("AGENT_RUNNER_CODEX_SESSION_FILE", "/stale/parent/session")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn cross_account_child_rebinds_inherited_sqlite_home_to_selected_account() {
+    use std::io::Write;
+    let f = Fixture::new();
+    fake_native(
+        &f,
+        r#"sys.stdin.read()
+expected=os.path.join(os.environ['HOME'],'.codex4')
+assert os.environ['CODEX_HOME'] == expected
+assert os.environ['CODEX_SQLITE_HOME'] == expected
+print(json.dumps({'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'}),flush=True)
+print(json.dumps({'type':'turn.completed'}),flush=True)"#,
+    );
+    let mut request = f.request.clone();
+    request["provider_instance_id"] = json!("codex4");
+    request["params"]["settings_id"] = json!("codex4");
+    request["params"]["argv"][0] = json!("codex4");
+    let parent_home = f.root.path().join(".codex3");
+    request["host"]["env"]["CODEX_SQLITE_HOME"] = json!(parent_home);
+    request["params"]["env"]["CODEX_SQLITE_HOME"] = json!(parent_home);
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"))
+        .arg("launch")
+        .env("CODEX_HOME", &parent_home)
+        .env("CODEX_SQLITE_HOME", &parent_home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn child_instructions_reset_survives_runner_policy_environment_merge() {
+    use std::io::Write;
+    const CARRIER: &str = "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS";
+    for selected in [
+        None,
+        Some(""),
+        Some("  "),
+        Some("selected child instructions"),
+    ] {
+        let f = Fixture::new();
+        let expected = selected.filter(|value| !value.trim().is_empty());
+        fake_native(
+            &f,
+            r#"sys.stdin.read()
+expected=os.environ.get('EXPECTED_DEVELOPER')
+assert os.environ.get('AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS') == expected
+pairs=[value for value in sys.argv if value.startswith('developer_instructions=')]
+assert pairs == ([] if expected is None else ['developer_instructions='+json.dumps(expected)])
+print(json.dumps({'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'}),flush=True)
+print(json.dumps({'type':'turn.completed'}),flush=True)"#,
+        );
+        let mut request = f.request.clone();
+        request["host"]["env"][CARRIER] = json!("stale host instructions");
+        let mut admission = request.clone();
+        admission["params"]["launch"] =
+            json!({"argv":request["params"]["argv"],"env":{CARRIER:"stale incoming carrier"}});
+        if let Some(value) = selected {
+            admission["params"]["launch"]["system_prompt_override"] = json!(value);
+        }
+        let (code, response) = f.invoke("policy.evaluate", &admission);
+        assert_eq!(code, 0);
+        let admitted = &response[0]["result"];
+        assert_eq!(admitted["accepted"], true, "{admitted}");
+        assert_eq!(admitted["env"][CARRIER], json!(expected.unwrap_or("")));
+        // Runner policy_transform merges admitted entries into the original
+        // candidate environment. A missing result key must not pass this test.
+        let mut merged = admission["params"]["launch"]["env"]
+            .as_object()
+            .unwrap()
+            .clone();
+        merged.extend(admitted["env"].as_object().unwrap().clone());
+        request["params"]["env"] = json!(merged);
+        if let Some(value) = expected {
+            request["host"]["env"]["EXPECTED_DEVELOPER"] = json!(value);
+        }
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"))
+            .arg("launch")
+            .env(CARRIER, "stale process instructions")
+            .env_remove("EXPECTED_DEVELOPER")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&request).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "selected={selected:?}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
 fn sigterm_cancels_cli_and_reaps_native_process_group() {
     use std::io::Write;
     let f = Fixture::new();
@@ -664,4 +827,113 @@ print(json.dumps({'type':'turn.completed'}),flush=True)"#,
     assert_eq!(summary["stdout"]["bytes"], 49 * (1024 * 1024 + 1));
     assert_eq!(summary["data_event_count"], 49);
     assert!(sink.exit.is_some());
+}
+
+#[test]
+fn native_error_classification_survives_launch_output_custody_and_replay() {
+    for (message, expected) in [
+        (
+            "You've hit your usage limit. Try again later.",
+            "quota_exhausted_inband",
+        ),
+        ("rate limit exceeded: request limit reached", "rate_limited"),
+        (
+            "unexpected status 429 Too Many Requests: synthetic test",
+            "rate_limited",
+        ),
+    ] {
+        let f = Fixture::new();
+        let event = json!({"type":"turn.failed","error":{"message":message}});
+        fake_native(
+            &f,
+            &format!(
+                "sys.stdin.read()\nprint({},flush=True)\nsys.exit(1)",
+                json!(event.to_string())
+            ),
+        );
+        let request = output_request(&f);
+        let first = f.invoke("launch", &request);
+        assert_eq!(first.0, 1);
+        assert_eq!(first.1.last().unwrap()["terminal_signal"]["kind"], expected);
+        assert_complete_output(&first.1);
+        assert_eq!(first, f.invoke("launch", &request));
+        let stderr: Vec<u8> = first
+            .1
+            .iter()
+            .filter(|e| e["kind"] == "stderr")
+            .flat_map(|e| {
+                agent_runner_codex::encoding::decode_base64(e["data_base64"].as_str().unwrap())
+                    .unwrap()
+            })
+            .collect();
+        let mut classify = request.clone();
+        classify["params"] = json!({"stdout_base64":"","stderr_base64":encode_base64(&stderr),
+            "status":{"kind":"exited","code":1},"observed_at_unix_ms":1});
+        assert_eq!(
+            f.invoke("terminal.classify", &classify).1[0]["result"]["terminal_signal"]["kind"],
+            expected
+        );
+    }
+}
+
+#[test]
+fn recovered_rate_limit_and_assistant_prose_do_not_poison_successful_launch() {
+    let f = Fixture::new();
+    let event = json!({"type":"error","message":"rate limit exceeded: temporary retry"});
+    let path = f.root.path().join("codex");
+    let body = fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "for event in [",
+            &format!(
+                "print({},flush=True)\nfor event in [",
+                json!(event.to_string())
+            ),
+        )
+        .replace("'native-ok'", "\"You've hit your usage limit.\"");
+    file(&path, &body);
+    let result = f.invoke("launch", &output_request(&f));
+    assert_eq!(result.0, 0);
+    assert_eq!(
+        result.1.last().unwrap()["terminal_signal"]["kind"],
+        "clean_exit"
+    );
+    assert_complete_output(&result.1);
+}
+
+#[test]
+fn signal_and_host_cancellation_override_native_rate_error() {
+    for cancelled in [false, true] {
+        let f = Fixture::new();
+        let end = if cancelled {
+            "time.sleep(30)"
+        } else {
+            "os.kill(os.getpid(),9)"
+        };
+        fake_native(&f, &format!("sys.stdin.read()\nprint(json.dumps({{'type':'error','message':'rate limit exceeded: synthetic'}}),flush=True)\n{end}"));
+        let mut request = output_request(&f);
+        if cancelled {
+            request["host"]["deadline_unix_ms"] = json!(now_ms() + 600);
+        }
+        let result = f.invoke("launch", &request);
+        assert_eq!(result.0, if cancelled { 130 } else { 137 });
+        let exit = result.1.last().unwrap();
+        assert_eq!(
+            exit["terminal_signal"]["kind"],
+            if cancelled {
+                "cancelled"
+            } else {
+                "signal_exit"
+            }
+        );
+        assert_eq!(
+            exit["status"]["kind"],
+            if cancelled {
+                "cancelled"
+            } else {
+                "signal_terminated"
+            }
+        );
+        assert_complete_output(&result.1);
+    }
 }

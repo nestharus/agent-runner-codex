@@ -204,7 +204,7 @@ fn validate_admission(request: &RequestEnvelope) -> Result<(), ProviderFailure> 
     Ok(())
 }
 
-fn valid_thread_id(id: &str) -> bool {
+pub(crate) fn valid_thread_id(id: &str) -> bool {
     id.len() == 36
         && id.bytes().enumerate().all(|(i, c)| {
             if [8, 13, 18, 23].contains(&i) {
@@ -223,7 +223,7 @@ fn publish_session(path: &Path, id: &str) -> Result<(), ProviderFailure> {
     Ok(())
 }
 
-fn verify_version(
+pub(crate) fn verify_version(
     config: &RuntimeConfig,
     env: &BTreeMap<String, String>,
     request: &RequestEnvelope,
@@ -365,12 +365,28 @@ pub fn native_args(
         "exec".into(),
         "--ignore-user-config".into(),
         "--ignore-rules".into(),
-        "--dangerously-bypass-approvals-and-sandbox".into(),
+    ];
+    args.extend(managed_native_args(config, plan, env));
+    args.extend([
         "--skip-git-repo-check".into(),
         "--json".into(),
         "--color".into(),
         "never".into(),
-    ];
+    ]);
+    if let Some(id) = session {
+        args.extend(["resume".into(), id.into()]);
+    }
+    args.push("-".into());
+    args
+}
+
+/// Identical model, system instructions and tool inventory for exec and TUI.
+pub(crate) fn managed_native_args(
+    config: &RuntimeConfig,
+    plan: &Plan,
+    env: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut args = vec!["--dangerously-bypass-approvals-and-sandbox".into()];
     args.extend(crate::models::args(&plan.model, &plan.effort));
     for pair in [
         format!(
@@ -434,10 +450,6 @@ pub fn native_args(
             format!("developer_instructions={}", json!(instructions)),
         ]);
     }
-    if let Some(id) = session {
-        args.extend(["resume".into(), id.into()]);
-    }
-    args.push("-".into());
     args
 }
 
@@ -611,7 +623,24 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     if let Some(host_env) = &request.host.env {
         env.extend(host_env.clone());
     }
+    // Only the explicit policy-admitted launch environment may carry account
+    // instructions; parent process/host environments are stale for this turn.
+    env.remove("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS");
     env.extend(plan.env.clone());
+    if env
+        .get("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS")
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        env.remove("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS");
+    }
+    // A headless child can inherit these from a managed TUI parent. Its MCP
+    // transport must use the private launch receipt and headless lease policy.
+    for key in [
+        "AGENT_RUNNER_CODEX_INTERACTIVE",
+        "AGENT_RUNNER_CODEX_SESSION_BINDING",
+    ] {
+        env.remove(key);
+    }
     env.insert(
         "AGENT_BASH_BIN".into(),
         config.agent_bash_bin.display().to_string(),
@@ -649,6 +678,13 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     let args = native_args(&config, &plan, &env, session);
     let mut gate =
         native_process::GatedCommand::new(&config.codex_bin, &args).map_err(io_failure)?;
+    for key in [
+        "AGENT_RUNNER_CODEX_INTERACTIVE",
+        "AGENT_RUNNER_CODEX_SESSION_BINDING",
+        "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS",
+    ] {
+        gate.command_mut().env_remove(key);
+    }
     if session.is_none() {
         gate.command_mut()
             .env_remove("AGENT_RUNNER_CODEX_SESSION_ID");
@@ -741,6 +777,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     let mut completed = false;
     let mut assistant_response = false;
     let mut failed = false;
+    let mut native_failure = None;
     let mut native_status = None;
     let mut last_heartbeat = Instant::now();
     let mut last_native_event = Instant::now();
@@ -809,9 +846,11 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
                         }
                         "turn.failed" => {
                             failed = true;
+                            native_failure = terminal::NativeFailure::from_event(&event);
                             stream.bytes("stderr", &bytes)?;
                         }
                         "error" => {
+                            native_failure = terminal::NativeFailure::from_event(&event);
                             stream.bytes("stderr", &bytes)?;
                         }
                         _ => {}
@@ -896,7 +935,16 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     } else {
         code
     };
-    let terminal_status = forced_status.unwrap_or(terminal::ProcessStatus::Exited { code });
+    let terminal_status = forced_status.unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return terminal::ProcessStatus::SignalTerminated { signal };
+            }
+        }
+        terminal::ProcessStatus::Exited { code }
+    });
     let code = terminal::exit_code_for_status(&terminal_status);
     if completed && !failed && assistant_response && code == 0 {
         stream.marker("oulipoly.produced_assistant_response", json!(true))?;
@@ -905,7 +953,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         stream.marker(LAUNCH_OUTPUT_COMPLETE_MARKER, stream.output.value())?;
     }
     stream.event(json!({"kind":"exit", "status":terminal::process_status_json(&terminal_status),
-        "terminal_signal":terminal::classify(&terminal_status,now_unix_ms()), "session":{"provider_session_id":thread_id}}))?;
+        "terminal_signal":terminal::classify_with_failure(&terminal_status,now_unix_ms(),native_failure), "session":{"provider_session_id":thread_id}}))?;
     stream.journal.sync_all().map_err(io_failure)?;
     state.journal_sha256 = Some(format!("{:x}", stream.journal_sha256.clone().finalize()));
     state.journal_len = Some(stream.bytes);

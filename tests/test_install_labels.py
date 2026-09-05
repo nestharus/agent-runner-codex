@@ -21,7 +21,10 @@ class LabelInstallerTests(unittest.TestCase):
         self.models = self.config / 'models'
         self.models.mkdir(parents=True)
         self.original_providers = ''.join(
-            f'[{account}]\ncommand="{account}"\n'
+            f'[{account}]\ncommand="{account}"\ninteractive_args=["--dangerously-bypass-approvals-and-sandbox"]\n'
+            'system_prompt_override="Keep the account instructions."\n'
+            f'[{account}.tool_restrictions]\nkind="codex"\n'
+            f'[{account}.resume]\nkind="subcommand"\nsubcommand=["resume"]\n'
             f'[{account}.implementation]\nfamily="codex"\nexecutable="/old/provider"\n'
             for account in ACCOUNTS
         )
@@ -53,6 +56,15 @@ class LabelInstallerTests(unittest.TestCase):
                 expected = ['-m', 'gpt-5.6-luna', '-c', f'model_reasoning_effort="{effort}"']
                 self.assertEqual(account['args'], expected)
                 self.assertEqual(account['interactive_args'], expected)
+        accounts = tomllib.loads((self.config / 'providers.toml').read_text())
+        for name in ACCOUNTS:
+            account = accounts[name]
+            self.assertEqual(account['command'], str(PROVIDER))
+            self.assertEqual(account['interactive_args'], ['interactive', '--settings-id', name,
+                                                         '--config-root', str(self.config)])
+            self.assertEqual(account['resume'], {'kind':'flag', 'flag':'--resume'})
+            self.assertEqual(account['system_prompt_override'], 'Keep the account instructions.')
+            self.assertEqual(account['tool_restrictions'], {'kind':'codex'})
         backups = list((self.config / 'backups').glob('codex-luna-*'))
         self.assertEqual(len(backups), 1)
         self.assertEqual((backups[0] / 'providers.toml').read_text(), self.original_providers)
@@ -74,6 +86,26 @@ class LabelInstallerTests(unittest.TestCase):
         for effort in ['low', 'max']:
             self.assertEqual((self.models / f'gpt-luna-{effort}.toml').read_text(),
                              '# previous OpenCode route\n')
+        self.assertFalse((self.config / 'backups').exists())
+
+    def test_staging_changes_pty_route_without_mutating_installed_configuration(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.config / 'providers.toml').read_text(), self.original_providers)
+        staged = tomllib.loads((self.root / 'stage/providers.toml.proposed').read_text())
+        self.assertEqual(staged['codex3']['resume'], {'kind':'flag', 'flag':'--resume'})
+        self.assertEqual(staged['codex3']['interactive_args'][0], 'interactive')
+
+    def test_old_headless_provider_cannot_activate_pty_routes(self):
+        old = self.root / 'headless-only-provider'
+        old.write_text('#!/usr/bin/env python3\nimport os,sys\n'
+                       'if sys.argv[1:] == ["interactive", "--help"]: sys.exit(1)\n'
+                       f'os.execv({str(PROVIDER)!r}, [{str(PROVIDER)!r}, *sys.argv[1:]])\n')
+        old.chmod(0o755)
+        result = self.install('--apply', provider=old)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Managed Codex PTY launcher is unavailable', result.stderr)
+        self.assertEqual((self.config / 'providers.toml').read_text(), self.original_providers)
         self.assertFalse((self.config / 'backups').exists())
 
 

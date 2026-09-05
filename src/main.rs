@@ -7,6 +7,9 @@ fn main() {
     if args.get(1).map(String::as_str) == Some(agent_runner_codex::NATIVE_EFFECT_GATE_ARG) {
         std::process::exit(agent_runner_codex::run_native_effect_gate(&args));
     }
+    if args.get(1).map(String::as_str) == Some("interactive") {
+        std::process::exit(agent_runner_codex::interactive::run(&args[2..]));
+    }
     let stdin = read_stdin_or_exit();
     let exit_code = agent_runner_codex::write_invocation(&args, &stdin, &mut std::io::stdout());
     std::process::exit(exit_code);

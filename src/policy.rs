@@ -202,9 +202,24 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
     if prompt.is_empty() {
         return Err(invalid("missing_prompt", "A nonempty prompt is required"));
     }
-    let supplied: Vec<String> =
+    let mut supplied: Vec<String> =
         serde_json::from_value(launch.get("argv").cloned().unwrap_or(Value::Null))
             .map_err(|_| invalid("invalid_argv", "argv must be an array"))?;
+    // The same installed artifact can own the interactive native command while
+    // implementing headless JSON launches. Bind this carrier to our executable
+    // identity, never just a matching basename or an arbitrary absolute path.
+    if let Some(carrier) = supplied.first() {
+        if std::path::Path::new(carrier).is_absolute()
+            && std::fs::canonicalize(carrier).ok().is_some_and(|path| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|current| std::fs::canonicalize(current).ok())
+                    .is_some_and(|current| current == path)
+            })
+        {
+            supplied[0] = settings_id.to_string();
+        }
+    }
     let mut canonical = vec![
         settings_id.to_string(),
         "exec".into(),
@@ -255,7 +270,18 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
         }
     }
     env.insert("CODEX_HOME".into(), codex_home.display().to_string());
+    // Managed TUI parents export a SQLite home separately from CODEX_HOME.
+    // Rebind both stores when a child selects another account.
+    env.insert("CODEX_SQLITE_HOME".into(), codex_home.display().to_string());
     if is_policy {
+        // This carrier is an output of policy admission, not a source of
+        // account instructions. The runner merges this map into the candidate
+        // environment, so omission cannot clear an inherited carrier. Emit an
+        // explicit reset which native launch consumes without forwarding it.
+        env.insert(
+            "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS".into(),
+            String::new(),
+        );
         if let Some(instructions) = launch
             .get("system_prompt_override")
             .and_then(Value::as_str)

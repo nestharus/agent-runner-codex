@@ -4,10 +4,12 @@ import json
 import os
 from pathlib import Path
 import select
+import socket
 import shutil
 import subprocess
 import tempfile
 import time
+import threading
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -35,7 +37,7 @@ class AdapterTest(unittest.TestCase):
         fake.write_text(FAKE)
         fake.chmod(0o755)
         self.env = dict(os.environ)
-        for name in ("OULIPOLY_LIVE_SESSION_BIND_SOCKET", "OULIPOLY_LIVE_SESSION_BIND_TOKEN", "OULIPOLY_PARENT_INVOCATION", "AGENT_RUNNER_CODEX_SESSION_FILE", "AGENT_RUNNER_CODEX_SESSION_ID"):
+        for name in ("OULIPOLY_LIVE_SESSION_BIND_SOCKET", "OULIPOLY_LIVE_SESSION_BIND_TOKEN", "OULIPOLY_PARENT_INVOCATION", "AGENT_RUNNER_CODEX_SESSION_FILE", "AGENT_RUNNER_CODEX_SESSION_ID", "AGENT_RUNNER_CODEX_SESSION_BINDING", "AGENT_RUNNER_CODEX_INTERACTIVE"):
             self.env.pop(name, None)
         self.env.update(AGENT_BASH_BIN=str(fake), FAKE_LOG=str(self.log), AGENT_RUNNER_CODEX_SESSION_ID="codex-native-test", AGENT_BASH_TOOL_POLL_MS="25", TEST_INHERITED_VALUE="inherited")
         self.process = None
@@ -153,6 +155,81 @@ class AdapterTest(unittest.TestCase):
     def test_invalid_arguments_do_not_dispatch(self):
         self.start()
         self.send("tools/call", {"name": "bash", "arguments": {"command": 123}})
+        self.assertTrue(self.receive()["result"]["isError"])
+        self.assertEqual(self.calls(), [])
+
+    def interactive_metadata(self):
+        self.env.pop("AGENT_RUNNER_CODEX_SESSION_ID", None)
+        self.env["AGENT_RUNNER_CODEX_SESSION_BINDING"] = "tool_metadata"
+        self.env["AGENT_RUNNER_CODEX_INTERACTIVE"] = "1"
+        self.env["CODEX_THREAD_ID"] = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        return {"threadId": "11111111-2222-3333-4444-555555555555"}
+
+    def test_tui_metadata_binds_exact_native_session_before_dispatch(self):
+        metadata = self.interactive_metadata()
+        listener = socket.socket(socket.AF_UNIX)
+        path = self.root / "bind.sock"
+        listener.bind(str(path))
+        listener.listen(1)
+        listener.settimeout(3)
+        self.env.update(OULIPOLY_LIVE_SESSION_BIND_SOCKET=str(path), OULIPOLY_LIVE_SESSION_BIND_TOKEN="fixture-token", OULIPOLY_PARENT_INVOCATION=json.dumps({"id": "fixture-invocation"}))
+        reports = []
+        def acknowledge():
+            connection, _ = listener.accept()
+            with connection:
+                report = json.loads(connection.makefile("rb").readline())
+                reports.append(report)
+                self.assertEqual(self.calls(), [], "Dispatch must wait for binding acknowledgement")
+                connection.sendall((json.dumps({"ok": True, "session_id": report["provider_session_id"]}) + "\n").encode())
+        worker = threading.Thread(target=acknowledge)
+        worker.start()
+        try:
+            self.start()
+            self.send("tools/call", {"name": "bash", "arguments": {"command": "workload"}, "_meta": metadata})
+            self.assertNotIn("isError", self.receive()["result"])
+            worker.join(timeout=4)
+            self.assertEqual(reports, [{"schema_version": 1, "token": "fixture-token", "invocation_uuid": "fixture-invocation", "provider_session_id": metadata["threadId"]}])
+            self.assertEqual(self.calls()[0]["owner"], metadata["threadId"])
+        finally:
+            listener.close()
+            worker.join(timeout=4)
+
+    def test_tui_child_sync_selection_and_async_owner_lease_match_opencode(self):
+        metadata = self.interactive_metadata()
+        self.start()
+        self.send("tools/call", {"name": "bash", "arguments": {"command": "agents -m gpt-luna-low task", "delivery": "sync"}, "_meta": metadata})
+        result = self.receive()["result"]["content"][0]["text"]
+        self.assertIn("fixture-output", result)
+        self.assertNotIn("End this headless turn", result)
+        run = self.calls()[0]["args"]
+        self.assertIn("sync", run)
+        self.assertIn("--cancel-on-owner-exit", run)
+        self.send("tools/call", {"name": "bash", "arguments": {"command": "agents -m gpt-luna-low task"}, "_meta": metadata}, request_id=2)
+        result = self.receive()["result"]["content"][0]["text"]
+        self.assertNotIn("End this headless turn", result)
+        run = [call for call in self.calls() if call["args"][0] == "run"][-1]["args"]
+        self.assertIn("async", run)
+        self.assertIn("--cancel-on-owner-exit", run)
+
+    def test_tui_missing_or_changed_metadata_never_uses_parent_identity(self):
+        metadata = self.interactive_metadata()
+        self.start()
+        for bad in [None, {}, {"threadId": "not-a-uuid"}]:
+            self.send("tools/call", {"name": "bash", "arguments": {"command": "workload"}, "_meta": bad})
+            self.assertTrue(self.receive()["result"]["isError"])
+        self.assertEqual(self.calls(), [])
+        self.send("tools/call", {"name": "bash", "arguments": {"command": "workload"}, "_meta": metadata})
+        self.assertNotIn("isError", self.receive()["result"])
+        count = len(self.calls())
+        self.send("tools/call", {"name": "bash", "arguments": {"command": "workload"}, "_meta": {"threadId": self.env["CODEX_THREAD_ID"]}})
+        self.assertTrue(self.receive()["result"]["isError"])
+        self.assertEqual(len(self.calls()), count)
+
+    def test_tui_resume_metadata_must_match_owned_session(self):
+        metadata = self.interactive_metadata()
+        self.env["AGENT_RUNNER_CODEX_SESSION_ID"] = self.env["CODEX_THREAD_ID"]
+        self.start()
+        self.send("tools/call", {"name": "bash", "arguments": {"command": "workload"}, "_meta": metadata})
         self.assertTrue(self.receive()["result"]["isError"])
         self.assertEqual(self.calls(), [])
 

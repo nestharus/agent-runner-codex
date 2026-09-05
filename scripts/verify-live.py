@@ -15,6 +15,18 @@ import tomllib
 import uuid
 
 
+def isolated_environment(config_home, data_dir):
+    environment = os.environ.copy()
+    # These capabilities belong to the invoking session, not the isolated
+    # runner. Inheriting them can report our new thread to the parent's socket.
+    for name in ("OULIPOLY_PARENT_INVOCATION", "OULIPOLY_COMPLETION_REGISTRATION_AUTHORITY",
+                 "OULIPOLY_LIVE_SESSION_BIND_SOCKET", "OULIPOLY_LIVE_SESSION_BIND_TOKEN"):
+        environment.pop(name, None)
+    environment.update({"OULIPOLY_CONFIG_HOME":str(config_home), "XDG_CONFIG_HOME":str(config_home),
+                        "OULIPOLY_DATA_DIR":str(data_dir)})
+    return environment
+
+
 def selected_tables(text, account):
     headers = list(re.finditer(r"(?m)^\[([^]\n]+)\]\s*$", text))
     selected = []
@@ -91,6 +103,8 @@ def main():
     parser.add_argument("--account", choices=("codex", "codex2", "codex3", "codex4", "codex5"), default="codex3")
     parser.add_argument("--config-root", type=Path, default=Path.home()/".config/oulipoly-agent-runner")
     parser.add_argument("--runner", type=Path, help="Installed runner executable; defaults to CONFIG_ROOT/runner/oulipoly-agent-runner")
+    parser.add_argument("--provider", type=Path, help="Provider executable to verify; defaults to the installed provider")
+    parser.add_argument("--mcp-bridge", type=Path, help="Bash MCP bridge to verify; defaults to the installed runtime configuration")
     parser.add_argument("--output-dir", type=Path, help="Empty output directory; defaults to a new temporary directory")
     parser.add_argument("--timeout", type=int, default=180, help="Maximum seconds per live turn")
     args = parser.parse_args()
@@ -108,9 +122,9 @@ def main():
     (config/"models").mkdir(parents=True)
     (config/"agent-runner-codex").mkdir()
     (runner.parent/"config.toml").write_text(f'data_dir = {json.dumps(str(output/"data"))}\nconfig_home = {json.dumps(str(config_home))}\n')
-    provider = source/"agent-runner-codex/agent-runner-codex"
+    provider = (args.provider or source/"agent-runner-codex/agent-runner-codex").expanduser().absolute()
     labels = runpy.run_path(str(Path(__file__).with_name("install-labels.py")))
-    providers = labels["update_providers"]((source/"providers.toml").read_text(), provider)
+    providers = labels["update_providers"]((source/"providers.toml").read_text(), provider, config)
     (config/"providers.toml").write_text(selected_tables(providers, args.account))
     (config/"config.toml").write_text(f'default_provider = {json.dumps(args.account)}\ndiagnostics_model = "codex-exec-bench"\n')
     if (source/"sessions.toml").exists():
@@ -120,6 +134,8 @@ def main():
     label = sections[0] + "".join("[[providers]]" + section for section in sections[1:] if f'name = "{args.account}"' in section)
     (config/"models/codex-exec-bench.toml").write_text(label)
     runtime = tomllib.loads((source/"agent-runner-codex/config.toml").read_text())
+    if args.mcp_bridge:
+        runtime["bash_mcp_path"] = str(args.mcp_bridge.expanduser().absolute())
     spooler = output/"agent-bash/agent-bash"
     spooler.parent.mkdir()
     shutil.copy2(runtime["agent_bash_bin"], spooler)
@@ -138,8 +154,7 @@ def main():
     if not args.run:
         print("Prepared only. Pass --run with a fresh output directory to perform the two live turns.")
         return
-    environment = os.environ.copy()
-    environment.update({"OULIPOLY_CONFIG_HOME":str(config_home), "XDG_CONFIG_HOME":str(config_home), "OULIPOLY_DATA_DIR":str(output/"data")})
+    environment = isolated_environment(config_home, output/"data")
     first = run_logged([str(runner), "--pin-provider", args.account, "-m", "codex-exec-bench", "-p", str(output), "-f", str(prompt)], environment, output/"smoke.log", args.timeout)
     session = first.get("provider_session_id")
     if not session or "CODEX-SMOKE-OK codex-bash-ok" not in (output/"smoke.log").read_text():

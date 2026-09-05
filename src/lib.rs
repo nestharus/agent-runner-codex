@@ -4,6 +4,7 @@ pub mod dispatch;
 mod durable_fs;
 pub mod encoding;
 pub mod envelope;
+pub mod interactive;
 pub mod launch;
 pub mod models;
 mod native_process;

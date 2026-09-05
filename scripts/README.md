@@ -39,8 +39,8 @@ The generated `models/` directory contains `codex-gpt-low`,
 `codex-gpt-medium`, `codex-gpt-high`, `codex-gpt-xhigh`, and `codex-gpt-max`. Each selects `gpt-6-astra`, the corresponding native Codex
 reasoning effort, and the five existing accounts `codex` through `codex5`.
 Both headless and interactive model arguments are included. `providers.patch`
-shows the five account implementation executable changes and canonical
-`settings_id` fields required by the active runner's account routing.
+shows the five account implementation executable changes, canonical
+`settings_id` fields, managed PTY commands, and `--resume` templates.
 `models.patch` shows each proposed model file change.
 
 After installing and validating the provider binary and its runtime config,
@@ -54,9 +54,11 @@ The default binary location is
 `~/.config/oulipoly-agent-runner/agent-runner-codex/agent-runner-codex`.
 `--config-root` and `--provider-path` select different installation locations.
 The installer backs up `providers.toml` under the configuration root's
-`backups/` directory and changes only the five Codex implementation paths and
-their canonical account settings IDs. Existing different settings IDs are
-rejected for review.
+`backups/` directory and routes the five Codex accounts through the provider's
+managed interactive launcher. It preserves account instructions and tool
+restrictions. Existing different settings IDs are rejected for review. Before
+activation, the binary must support both the requested model catalog and the
+managed `interactive` launcher; an older headless-only provider cannot pass.
 In the default temporary-label mode, existing OpenCode labels and the default
 provider stay unchanged. A differing existing `codex-gpt-*` label causes an
 error before installation.
@@ -115,6 +117,25 @@ session ID. The verifier reads the native rollout and requires exactly one
 completed Bash call per turn, each with `DONE rc=0` and its expected output;
 model text alone cannot pass the check. Logs, tool evidence, and result JSON
 stay in the printed verification directory.
+
+For the PTY path, use `scripts/verify-pty-live.py --run --account codex3
+--runner /path/to/runner --provider /path/to/agent-runner-codex`. This launches a
+real runner PTY and a Luna/low child with isolated runner and spooler state.
+It requires the Bash override to bind the native session automatically, then
+checks the mailbox, the actual notification user turn, and an assistant receipt
+that contains the child's result after reading its log. The test terminates its
+own PTY after recording the evidence. Existing PTYs keep their startup tool
+inventory; the updated routing takes effect on the next launch.
+Pass `--mcp-bridge /path/to/installed/integrations/codex/agent-bash-mcp.ts`
+to verify the installed bridge together with the installed executables.
+
+Add `--child-account codex4` with `--account codex3` to force the child onto
+another account. The verifier also requires the child's native thread to exist
+in that account's SQLite database and to be absent from the parent's database.
+
+Both live verifiers accept `--runner` and `--provider` to test worktree builds.
+They remove only enclosing runner session capabilities from the inherited
+environment; those identities cannot be reused in the isolated runner.
 
 The files under `examples/` use a `binary` reference resolved through `PATH`;
 the installer generates absolute `path` references to the selected installed
