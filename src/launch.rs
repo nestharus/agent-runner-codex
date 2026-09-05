@@ -953,7 +953,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         stream.marker(LAUNCH_OUTPUT_COMPLETE_MARKER, stream.output.value())?;
     }
     stream.event(json!({"kind":"exit", "status":terminal::process_status_json(&terminal_status),
-        "terminal_signal":terminal::classify_with_failure(&terminal_status,now_unix_ms(),native_failure), "session":{"provider_session_id":thread_id}}))?;
+        "terminal_signal":terminal::classify_with_failure(&terminal_status,now_unix_ms(),native_failure,terminal::host_supports_unavailable(&request.host)), "session":{"provider_session_id":thread_id}}))?;
     stream.journal.sync_all().map_err(io_failure)?;
     state.journal_sha256 = Some(format!("{:x}", stream.journal_sha256.clone().finalize()));
     state.journal_len = Some(stream.bytes);

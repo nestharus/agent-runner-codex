@@ -23,6 +23,18 @@ Quota probing uses the installed `~/.local/bin/chatgpt-usage` adapter against
 each selected native auth file. Standalone authentication refresh is unsupported;
 Codex retains its native token refresh during execution.
 
+Native `server_overloaded` failures, including remote compaction failures, map to
+`provider_unavailable` when the runner explicitly selects
+`host.env.OULIPOLY_HOST_TERMINAL_UNAVAILABLE_V1=1`, as defined by the SDK-owned
+[terminal-unavailable extension](contract/extensions/terminal-unavailable/README.md).
+This preserves the native
+failure separately from account quota exhaustion and rate limits. It does not
+exhaust or rotate an account, or replay the failed turn. The exec JSON surface
+only exposes Codex's normalized message, so the adapter does not infer the raw
+HTTP status or whether Codex normalized a service overload or ramp-rate limit.
+Older hosts receive `nonzero_exit` with fixed `codex.exec: server_overloaded`
+evidence. Successful recovery, cancellation, and signals retain precedence.
+
 The compatibility account IDs are `codex`, `codex2`, `codex3`, `codex4`, and
 `codex5`. They select `~/.codex` through `~/.codex5`, respectively. The provider
 sets `CODEX_HOME` explicitly even when launched from another Codex account.

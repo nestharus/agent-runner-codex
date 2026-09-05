@@ -837,6 +837,8 @@ fn native_error_classification_survives_launch_output_custody_and_replay() {
             "quota_exhausted_inband",
         ),
         ("rate limit exceeded: request limit reached", "rate_limited"),
+        ("Selected model is at capacity. Please try a different model.", "provider_unavailable"),
+        ("Error running remote compact task: Selected model is at capacity. Please try a different model.", "provider_unavailable"),
         (
             "unexpected status 429 Too Many Requests: synthetic test",
             "rate_limited",
@@ -851,7 +853,8 @@ fn native_error_classification_survives_launch_output_custody_and_replay() {
                 json!(event.to_string())
             ),
         );
-        let request = output_request(&f);
+        let mut request = output_request(&f);
+        request["host"]["env"]["OULIPOLY_HOST_TERMINAL_UNAVAILABLE_V1"] = json!("1");
         let first = f.invoke("launch", &request);
         assert_eq!(first.0, 1);
         assert_eq!(first.1.last().unwrap()["terminal_signal"]["kind"], expected);
@@ -936,4 +939,22 @@ fn signal_and_host_cancellation_override_native_rate_error() {
         );
         assert_complete_output(&result.1);
     }
+}
+
+#[test]
+fn unavailable_launch_remains_compatible_with_unselected_hosts() {
+    let f = Fixture::new();
+    let event = json!({"type":"turn.failed","error":{"message":"Error running remote compact task: Selected model is at capacity. Please try a different model."}});
+    fake_native(
+        &f,
+        &format!(
+            "sys.stdin.read()\nprint({},flush=True)\nsys.exit(1)",
+            json!(event.to_string())
+        ),
+    );
+    let result = f.invoke("launch", &output_request(&f));
+    assert_eq!(result.0, 1);
+    let signal = &result.1.last().unwrap()["terminal_signal"];
+    assert_eq!(signal["kind"], "nonzero_exit");
+    assert_eq!(signal["evidence"], "codex.exec: server_overloaded");
 }

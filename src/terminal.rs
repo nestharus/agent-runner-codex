@@ -5,6 +5,16 @@ use crate::envelope::ProviderFailure;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+pub const HOST_TERMINAL_UNAVAILABLE_ENV: &str = "OULIPOLY_HOST_TERMINAL_UNAVAILABLE_V1";
+
+pub fn host_supports_unavailable(host: &crate::envelope::HostContext) -> bool {
+    host.env
+        .as_ref()
+        .and_then(|env| env.get(HOST_TERMINAL_UNAVAILABLE_ENV))
+        .map(String::as_str)
+        == Some("1")
+}
+
 const TERMINAL_SIGNAL_EVIDENCE_MAX_LEN: usize = 160;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -18,7 +28,11 @@ pub enum ProcessStatus {
     Unknown,
 }
 
-pub fn classify_params(params: Value, request_id: &str) -> Result<Value, ProviderFailure> {
+pub fn classify_params(
+    params: Value,
+    request_id: &str,
+    supports_unavailable: bool,
+) -> Result<Value, ProviderFailure> {
     let params = parse_classify_params(params, request_id)?;
     let _stdout = decode_stream(&params.stdout_base64, request_id, "stdout_base64")?;
     let stderr = decode_stream(&params.stderr_base64, request_id, "stderr_base64")?;
@@ -32,18 +46,24 @@ pub fn classify_params(params: Value, request_id: &str) -> Result<Value, Provide
             }
         }
     }
-    let signal = classify_with_failure(&params.status, params.observed_at_unix_ms, failure);
+    let signal = classify_with_failure(
+        &params.status,
+        params.observed_at_unix_ms,
+        failure,
+        supports_unavailable,
+    );
     Ok(classify_result(signal))
 }
 
 pub fn classify(status: &ProcessStatus, observed_at_unix_ms: u64) -> Value {
-    classify_with_failure(status, observed_at_unix_ms, None)
+    classify_with_failure(status, observed_at_unix_ms, None, false)
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NativeFailure {
     Quota,
     RateLimit,
+    Unavailable,
 }
 
 pub(crate) fn is_native_error(event: &Value) -> bool {
@@ -61,6 +81,13 @@ impl NativeFailure {
             "error" => event.get("message")?.as_str()?,
             _ => return None,
         };
+        // This exact wrapper is emitted by core/src/compact_remote.rs.
+        let message = message
+            .strip_prefix("Error running remote compact task: ")
+            .unwrap_or(message);
+        if message == "Selected model is at capacity. Please try a different model." {
+            return Some(Self::Unavailable);
+        }
         if message.starts_with("You've hit your usage limit.")
             || message.starts_with("You've hit your usage limit for ")
             || message == "Quota exceeded. Check your plan and billing details."
@@ -84,6 +111,7 @@ pub(crate) fn classify_with_failure(
     status: &ProcessStatus,
     observed_at_unix_ms: u64,
     failure: Option<NativeFailure>,
+    supports_unavailable: bool,
 ) -> Value {
     // Explicit process outcomes take precedence. A recovered request that exits
     // successfully must not poison an account because an earlier retry failed.
@@ -96,6 +124,14 @@ pub(crate) fn classify_with_failure(
                     ("quota_exhausted_inband", "codex.exec: usage limit reached")
                 }
                 NativeFailure::RateLimit => ("rate_limited", "codex.exec: rate limit exceeded"),
+                NativeFailure::Unavailable => (
+                    if supports_unavailable {
+                        "provider_unavailable"
+                    } else {
+                        "nonzero_exit"
+                    },
+                    "codex.exec: server_overloaded",
+                ),
             };
             // Fixed evidence avoids copying request IDs, URLs or credentials
             // from native diagnostics into terminal classification records.

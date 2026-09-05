@@ -70,7 +70,11 @@ pub fn write_invocation<W: Write>(args: &[String], input: &[u8], writer: &mut W)
             "discovery.accounts" => discovery::accounts(),
             "policy.evaluate" => policy::evaluate(&request)?,
             op if op.starts_with("quota.") => crate::quota::handle(op, &request)?,
-            "terminal.classify" => terminal::classify_params(request.params.clone(), &request_id)?,
+            "terminal.classify" => terminal::classify_params(
+                request.params.clone(),
+                &request_id,
+                terminal::host_supports_unavailable(&request.host),
+            )?,
             op if op.starts_with("session.") => session::handle(op, &request)?,
             "setup.detect" => {
                 let validation =
