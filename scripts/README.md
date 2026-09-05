@@ -76,10 +76,21 @@ Review `models.patch` before applying. This mode replaces those five existing
 model files and saves their previous contents under `backups/codex-astra-*/models/`
 alongside the provider configuration backup. It preserves the temporary
 `codex-gpt-*` aliases, other model labels, and the configured default provider.
-Before either mode applies any routing changes, the installed provider must
-advertise every target label with the exact Astra model, reasoning arguments,
+Before any mode applies routing changes, the installed provider must
+advertise every target label with the exact selected model, reasoning arguments,
 and all five eligible accounts. Install the updated provider first when
 promoting the standard labels.
+
+To migrate the existing `gpt-luna-low` and `gpt-luna-max` labels to Codex:
+
+```bash
+python3 scripts/install-labels.py --luna-labels --stage-root /tmp/codex-luna-labels
+python3 scripts/install-labels.py --luna-labels --stage-root /tmp/codex-luna-labels --apply
+```
+
+This mode preserves `gpt-5.6-luna` and its low/max efforts and uses all five
+Codex accounts. It saves replaced routes under `backups/codex-luna-*/models/`.
+It cannot be combined with `--standard-labels`.
 
 `benchmark-models/codex-exec-bench.toml` is generated separately and never
 installed into production routing. It uses `gpt-5.6-luna` at low reasoning for

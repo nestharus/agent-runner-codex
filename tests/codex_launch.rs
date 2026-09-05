@@ -106,6 +106,53 @@ fn standard_labels_launch_the_same_astra_configuration_as_temporary_aliases() {
 }
 
 #[test]
+fn luna_labels_launch_luna_with_managed_tools_in_every_account() {
+    for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
+        for effort in ["low", "max"] {
+            let f = Fixture::new();
+            let mut request = f.request.clone();
+            let model_args = json!([
+                "-m",
+                "gpt-5.6-luna",
+                "-c",
+                format!("model_reasoning_effort=\"{effort}\"")
+            ]);
+            request["provider_instance_id"] = json!(account);
+            request["params"]["settings_id"] = json!(account);
+            request["params"]["model"]["name"] = json!(format!("gpt-luna-{effort}"));
+            request["params"]["model"]["provider_args"] = model_args.clone();
+            let mut argv = vec![
+                json!(account),
+                json!("exec"),
+                json!("--dangerously-bypass-approvals-and-sandbox"),
+            ];
+            argv.extend(model_args.as_array().unwrap().iter().cloned());
+            request["params"]["argv"] = json!(argv);
+            let (code, events) = f.invoke("launch", &request);
+            assert_eq!(code, 0, "{account}/gpt-luna-{effort}: {events:?}");
+            let call: Value = serde_json::from_str(
+                fs::read_to_string(f.root.path().join("calls.jsonl"))
+                    .unwrap()
+                    .trim(),
+            )
+            .unwrap();
+            assert_eq!(
+                call["home"],
+                json!(f.root.path().join(format!(".{account}")))
+            );
+            let argv = call["argv"].as_array().unwrap();
+            assert!(argv
+                .windows(2)
+                .any(|pair| pair == [json!("-m"), json!("gpt-5.6-luna")]));
+            assert!(argv.contains(&json!(format!("model_reasoning_effort=\"{effort}\""))));
+            assert!(argv.contains(&json!("features.shell_tool=false")));
+            assert!(argv.contains(&json!("features.multi_agent=false")));
+            assert!(argv.contains(&json!("mcp_servers.agent_bash.enabled_tools=[\"bash\"]")));
+        }
+    }
+}
+
+#[test]
 fn native_launch_preserves_environment_pins_account_and_publishes_real_completion() {
     let f = Fixture::new();
     let (code, events) = f.invoke("launch", &f.request);

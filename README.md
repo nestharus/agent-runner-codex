@@ -16,6 +16,9 @@ Codex-specific launch and rollout handling replace OpenCode's native boundaries.
 `codex-gpt-*` names remain equivalent aliases. Native sub-agent delegation
 remains disabled for every label.
 
+`gpt-luna-low` and `gpt-luna-max` use the same Codex adapter and five-account
+pool with `gpt-5.6-luna` and their corresponding reasoning efforts.
+
 Quota probing uses the installed `~/.local/bin/chatgpt-usage` adapter against
 each selected native auth file. Standalone authentication refresh is unsupported;
 Codex retains its native token refresh during execution.
@@ -86,6 +89,7 @@ being exposed as a Codex capability with different semantics.
 ```sh
 cargo test
 cargo build --release
+python3 tests/test_install_labels.py --binary target/release/agent-runner-codex
 python3 integrations/codex/test_mcp.py
 python3 tests/verify_codex_inventory.py --binary target/release/agent-runner-codex
 ```
@@ -118,6 +122,17 @@ agents -m gpt-high -p /path/to/project 'Your task'
 
 Promotion backs up the five previous route files. Both label families use the
 same Codex accounts, system prompt, and Bash tool configuration.
+
+To move the existing Luna labels from OpenCode to Codex while preserving Luna
+and its low/max reasoning efforts:
+
+```sh
+python3 scripts/install-labels.py --luna-labels --stage-root /tmp/agent-runner-luna-labels
+python3 scripts/install-labels.py --luna-labels --stage-root /tmp/agent-runner-luna-labels --apply
+```
+
+This backs up and replaces only `gpt-luna-low` and `gpt-luna-max`; the installer
+checks that the installed provider advertises both routes before applying them.
 
 `examples/benchmark-models/codex-exec-bench.toml` is a separately named
 `gpt-5.6-luna`/`low` live-test route. Use it in isolated runner configuration; the

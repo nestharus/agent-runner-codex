@@ -16,11 +16,11 @@ import threading
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path('target/debug/agent-runner-codex'))
-    parser.add_argument('--label', choices=[prefix+e for prefix in ['gpt-', 'codex-gpt-'] for e in ['low','medium','high','xhigh','max']]+['codex-exec-bench'], default='gpt-high')
+    parser.add_argument('--label', choices=[prefix+e for prefix in ['gpt-', 'codex-gpt-'] for e in ['low','medium','high','xhigh','max']]+['gpt-luna-low','gpt-luna-max','codex-exec-bench'], default='gpt-high')
     parser.add_argument('--positive-control', action='store_true', help='Remove user-config isolation and prove the injected project MCP appears')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
-    model = 'gpt-5.6-luna' if args.label == 'codex-exec-bench' else 'gpt-6-astra'
+    model = 'gpt-5.6-luna' if args.label == 'codex-exec-bench' or args.label.startswith('gpt-luna-') else 'gpt-6-astra'
     effort = 'low' if args.label == 'codex-exec-bench' else args.label.rsplit('-', 1)[-1]
     route_args = ['-m', model, '-c', 'model_reasoning_effort='+json.dumps(effort)]
     captured = []

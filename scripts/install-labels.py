@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage or apply Codex Astra labels, optionally promoting the standard GPT names."""
+"""Stage or apply Codex routes for Astra aliases or existing Luna labels."""
 
 import argparse
 from datetime import datetime, timezone
@@ -15,6 +15,7 @@ import uuid
 
 ACCOUNTS = ("codex", "codex2", "codex3", "codex4", "codex5")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+LUNA_EFFORTS = ("low", "max")
 
 
 def model_text(effort, provider_path, model="gpt-6-astra"):
@@ -110,7 +111,7 @@ def verify_provider_models(provider_path, config_root, models):
             raise SystemExit(f"Installed provider must advertise exactly one {name} route before applying labels")
         entry = matches[0]
         accounts = entry.get("eligible_accounts")
-        if (entry.get("provider_model") != "gpt-6-astra"
+        if (entry.get("provider_model") != expected[0]["args"][1]
                 or any(entry.get("provider_args") != provider["args"]
                        or entry.get("provider_args") != provider["interactive_args"] for provider in expected)
                 or not isinstance(accounts, list)
@@ -123,7 +124,9 @@ def main():
     parser.add_argument("--config-root", type=Path, default=Path.home()/".config/oulipoly-agent-runner")
     parser.add_argument("--stage-root", type=Path, required=True, help="Directory for reviewable labels and provider diff")
     parser.add_argument("--provider-path", type=Path, help="Installed provider binary; defaults to CONFIG_ROOT/agent-runner-codex/agent-runner-codex")
-    parser.add_argument("--standard-labels", action="store_true", help="Promote gpt-low/medium/high/xhigh/max to Codex Astra, backing up and replacing existing labels")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--standard-labels", action="store_true", help="Promote gpt-low/medium/high/xhigh/max to Codex Astra, backing up and replacing existing labels")
+    selection.add_argument("--luna-labels", action="store_true", help="Move gpt-luna-low/max to Codex Luna, backing up and replacing existing labels")
     parser.add_argument("--apply", action="store_true", help="Install after the Codex provider binary has been validated")
     args = parser.parse_args()
     provider_path = (args.provider_path or args.config_root/"agent-runner-codex/agent-runner-codex").expanduser().absolute()
@@ -138,8 +141,10 @@ def main():
         original.splitlines(keepends=True), proposed.splitlines(keepends=True),
         fromfile=str(providers_file), tofile=str(providers_file),
     )))
-    prefix = "gpt" if args.standard_labels else "codex-gpt"
-    models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path) for effort in EFFORTS}
+    prefix = "gpt-luna" if args.luna_labels else "gpt" if args.standard_labels else "codex-gpt"
+    model = "gpt-5.6-luna" if args.luna_labels else "gpt-6-astra"
+    efforts = LUNA_EFFORTS if args.luna_labels else EFFORTS
+    models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path, model) for effort in efforts}
     model_diffs = []
     for name, text in models.items():
         parsed = tomllib.loads(text)
@@ -160,11 +165,12 @@ def main():
             raise SystemExit(f"Codex provider is not installed at {provider_path}")
         for name, text in models.items():
             destination = args.config_root/"models"/name
-            if not args.standard_labels and destination.exists() and destination.read_text() != text:
+            if not (args.standard_labels or args.luna_labels) and destination.exists() and destination.read_text() != text:
                 raise SystemExit(f"Refusing to replace different existing label {destination}")
         verify_provider_models(provider_path, args.config_root, models)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-        backup = args.config_root/"backups"/f"codex-astra-{stamp}"
+        family = "luna" if args.luna_labels else "astra"
+        backup = args.config_root/"backups"/f"codex-{family}-{stamp}"
         backup.mkdir(parents=True)
         shutil.copy2(providers_file, backup/"providers.toml")
         (backup/"models").mkdir()
