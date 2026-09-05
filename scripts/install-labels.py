@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage or apply Codex routes for Astra aliases or existing Luna labels."""
+"""Stage or apply Codex routes for Astra, Luna, or Terra labels."""
 
 import argparse
 from datetime import datetime, timezone
@@ -15,7 +15,6 @@ import uuid
 
 ACCOUNTS = ("codex", "codex2", "codex3", "codex4", "codex5")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-LUNA_EFFORTS = ("low", "max")
 
 
 def model_text(effort, provider_path, model="gpt-6-astra"):
@@ -167,7 +166,8 @@ def main():
     parser.add_argument("--provider-path", type=Path, help="Installed provider binary; defaults to CONFIG_ROOT/agent-runner-codex/agent-runner-codex")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--standard-labels", action="store_true", help="Promote gpt-low/medium/high/xhigh/max to Codex Astra, backing up and replacing existing labels")
-    selection.add_argument("--luna-labels", action="store_true", help="Move gpt-luna-low/max to Codex Luna, backing up and replacing existing labels")
+    selection.add_argument("--luna-labels", action="store_true", help="Register gpt-luna-low/medium/high/xhigh/max with Codex Luna, backing up and replacing existing labels")
+    selection.add_argument("--terra-labels", action="store_true", help="Register gpt-terra-low/medium/high/xhigh/max with Codex Terra, backing up and replacing existing labels")
     parser.add_argument("--apply", action="store_true", help="Install after the Codex provider binary has been validated")
     args = parser.parse_args()
     provider_path = (args.provider_path or args.config_root/"agent-runner-codex/agent-runner-codex").expanduser().absolute()
@@ -182,10 +182,10 @@ def main():
         original.splitlines(keepends=True), proposed.splitlines(keepends=True),
         fromfile=str(providers_file), tofile=str(providers_file),
     )))
-    prefix = "gpt-luna" if args.luna_labels else "gpt" if args.standard_labels else "codex-gpt"
-    model = "gpt-5.6-luna" if args.luna_labels else "gpt-6-astra"
-    efforts = LUNA_EFFORTS if args.luna_labels else EFFORTS
-    models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path, model) for effort in efforts}
+    family = "luna" if args.luna_labels else "terra" if args.terra_labels else "astra"
+    prefix = f"gpt-{family}" if family != "astra" else "gpt" if args.standard_labels else "codex-gpt"
+    model = f"gpt-5.6-{family}" if family != "astra" else "gpt-6-astra"
+    models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path, model) for effort in EFFORTS}
     model_diffs = []
     for name, text in models.items():
         parsed = tomllib.loads(text)
@@ -206,12 +206,11 @@ def main():
             raise SystemExit(f"Codex provider is not installed at {provider_path}")
         for name, text in models.items():
             destination = args.config_root/"models"/name
-            if not (args.standard_labels or args.luna_labels) and destination.exists() and destination.read_text() != text:
+            if not (args.standard_labels or args.luna_labels or args.terra_labels) and destination.exists() and destination.read_text() != text:
                 raise SystemExit(f"Refusing to replace different existing label {destination}")
         verify_provider_models(provider_path, args.config_root, models)
         verify_interactive_launcher(provider_path)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-        family = "luna" if args.luna_labels else "astra"
         backup = args.config_root/"backups"/f"codex-{family}-{stamp}"
         backup.mkdir(parents=True)
         shutil.copy2(providers_file, backup/"providers.toml")

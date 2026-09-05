@@ -106,48 +106,64 @@ fn standard_labels_launch_the_same_astra_configuration_as_temporary_aliases() {
 }
 
 #[test]
-fn luna_labels_launch_luna_with_managed_tools_in_every_account() {
-    for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
-        for effort in ["low", "max"] {
-            let f = Fixture::new();
-            let mut request = f.request.clone();
-            let model_args = json!([
-                "-m",
-                "gpt-5.6-luna",
-                "-c",
-                format!("model_reasoning_effort=\"{effort}\"")
-            ]);
-            request["provider_instance_id"] = json!(account);
-            request["params"]["settings_id"] = json!(account);
-            request["params"]["model"]["name"] = json!(format!("gpt-luna-{effort}"));
-            request["params"]["model"]["provider_args"] = model_args.clone();
-            let mut argv = vec![
-                json!(account),
-                json!("exec"),
-                json!("--dangerously-bypass-approvals-and-sandbox"),
-            ];
-            argv.extend(model_args.as_array().unwrap().iter().cloned());
-            request["params"]["argv"] = json!(argv);
-            let (code, events) = f.invoke("launch", &request);
-            assert_eq!(code, 0, "{account}/gpt-luna-{effort}: {events:?}");
-            let call: Value = serde_json::from_str(
-                fs::read_to_string(f.root.path().join("calls.jsonl"))
-                    .unwrap()
-                    .trim(),
-            )
-            .unwrap();
-            assert_eq!(
-                call["home"],
-                json!(f.root.path().join(format!(".{account}")))
-            );
-            let argv = call["argv"].as_array().unwrap();
-            assert!(argv
-                .windows(2)
-                .any(|pair| pair == [json!("-m"), json!("gpt-5.6-luna")]));
-            assert!(argv.contains(&json!(format!("model_reasoning_effort=\"{effort}\""))));
-            assert!(argv.contains(&json!("features.shell_tool=false")));
-            assert!(argv.contains(&json!("features.multi_agent=false")));
-            assert!(argv.contains(&json!("mcp_servers.agent_bash.enabled_tools=[\"bash\"]")));
+fn luna_and_terra_labels_pass_policy_and_launch_with_managed_tools_in_every_account() {
+    for (family, model) in [("luna", "gpt-5.6-luna"), ("terra", "gpt-5.6-terra")] {
+        for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
+            for effort in ["low", "medium", "high", "xhigh", "max"] {
+                let f = Fixture::new();
+                let mut request = f.request.clone();
+                let model_args = json!([
+                    "-m",
+                    model,
+                    "-c",
+                    format!("model_reasoning_effort=\"{effort}\"")
+                ]);
+                request["provider_instance_id"] = json!(account);
+                request["params"]["settings_id"] = json!(account);
+                request["params"]["model"]["name"] = json!(format!("gpt-{family}-{effort}"));
+                request["params"]["model"]["provider_args"] = model_args.clone();
+                let mut argv = vec![
+                    json!(account),
+                    json!("exec"),
+                    json!("--dangerously-bypass-approvals-and-sandbox"),
+                ];
+                argv.extend(model_args.as_array().unwrap().iter().cloned());
+                request["params"]["argv"] = json!(argv);
+                let mut admission = request.clone();
+                admission["params"]["launch"] = json!({"argv": argv, "env": {}});
+                let (code, response) = f.invoke("policy.evaluate", &admission);
+                assert_eq!(code, 0, "{account}/gpt-{family}-{effort}: {response:?}");
+                assert_eq!(response[0]["result"]["accepted"], true, "{response:?}");
+                assert_eq!(
+                    response[0]["result"]["markers"][0]["value"],
+                    json!({"account": account, "model": model, "effort": effort})
+                );
+                let (code, events) = f.invoke("launch", &request);
+                assert_eq!(code, 0, "{account}/gpt-{family}-{effort}: {events:?}");
+                let call: Value = serde_json::from_str(
+                    fs::read_to_string(f.root.path().join("calls.jsonl"))
+                        .unwrap()
+                        .trim(),
+                )
+                .unwrap();
+                assert_eq!(
+                    call["home"],
+                    json!(f.root.path().join(format!(".{account}")))
+                );
+                let argv = call["argv"].as_array().unwrap();
+                assert!(argv
+                    .windows(2)
+                    .any(|pair| pair == [json!("-m"), json!(model)]));
+                assert!(argv.contains(&json!(format!("model_reasoning_effort=\"{effort}\""))));
+                assert!(argv.contains(&json!("features.shell_tool=false")));
+                assert!(argv.contains(&json!("features.multi_agent=false")));
+                assert!(argv.contains(&json!("features.plugins=false")));
+                assert!(argv.contains(&json!("features.remote_plugin=false")));
+                assert!(argv.iter().any(|value| value
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("model_instructions_file="))));
+                assert!(argv.contains(&json!("mcp_servers.agent_bash.enabled_tools=[\"bash\"]")));
+            }
         }
     }
 }
@@ -216,6 +232,45 @@ fn policy_rejects_route_overrides_before_spawn() {
     assert_ne!(code, 0);
     assert_eq!(events[0]["error"]["code"], "unmanaged_argv");
     assert!(!f.root.path().join("calls.jsonl").exists());
+}
+
+#[test]
+fn luna_and_terra_reject_ultra_and_cross_model_or_effort_arguments() {
+    for (family, model) in [("luna", "gpt-5.6-luna"), ("terra", "gpt-5.6-terra")] {
+        for (label_effort, argument_model, argument_effort, expected) in [
+            ("ultra", model, "ultra", "unknown_model"),
+            ("high", "gpt-6-astra", "high", "model_args_mismatch"),
+            ("high", model, "max", "model_args_mismatch"),
+        ] {
+            let f = Fixture::new();
+            let mut request = f.request.clone();
+            let args = json!([
+                "-m",
+                argument_model,
+                "-c",
+                format!("model_reasoning_effort=\"{argument_effort}\"")
+            ]);
+            request["params"]["model"]["name"] = json!(format!("gpt-{family}-{label_effort}"));
+            request["params"]["model"]["provider_args"] = args.clone();
+            let mut argv = vec![
+                json!("codex2"),
+                json!("exec"),
+                json!("--dangerously-bypass-approvals-and-sandbox"),
+            ];
+            argv.extend(args.as_array().unwrap().iter().cloned());
+            request["params"]["argv"] = json!(argv);
+            let mut admission = request.clone();
+            admission["params"]["launch"] = json!({"argv": argv, "env": {}});
+            let (code, response) = f.invoke("policy.evaluate", &admission);
+            assert_eq!(code, 0);
+            assert_eq!(response[0]["result"]["accepted"], false);
+            assert_eq!(response[0]["result"]["diagnostics"][0]["code"], expected);
+            let (code, events) = f.invoke("launch", &request);
+            assert_ne!(code, 0);
+            assert_eq!(events[0]["error"]["code"], expected);
+            assert!(!f.root.path().join("calls.jsonl").exists());
+        }
+    }
 }
 #[test]
 fn missing_instruction_file_is_rejected_before_spawn() {
@@ -609,17 +664,50 @@ fn sigterm_cancels_cli_and_reaps_native_process_group() {
 
 #[test]
 fn model_catalog_cannot_reenable_native_tools() {
-    let f = Fixture::new();
-    let path = f.root.path().join("models.json");
-    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    catalog["models"][0]["apply_patch_tool_type"] = json!("freeform");
-    fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
-    let result = f.invoke("launch", &f.request);
-    assert_eq!(
-        result.1[0]["error"]["code"],
-        "model_catalog_tools_unrestricted"
-    );
-    assert!(!f.root.path().join("calls.jsonl").exists());
+    for slug in ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra"] {
+        let f = Fixture::new();
+        let path = f.root.path().join("models.json");
+        let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let entry = catalog["models"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["slug"] == slug)
+            .unwrap();
+        entry["apply_patch_tool_type"] = json!("freeform");
+        fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+        let result = f.invoke("launch", &f.request);
+        assert_eq!(
+            result.1[0]["error"]["code"],
+            "model_catalog_tools_unrestricted"
+        );
+        assert!(!f.root.path().join("calls.jsonl").exists());
+    }
+}
+
+#[test]
+fn missing_or_duplicate_terra_metadata_rejects_launch_before_spawn() {
+    for duplicate in [false, true] {
+        let f = Fixture::new();
+        let path = f.root.path().join("models.json");
+        let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let entries = catalog["models"].as_array_mut().unwrap();
+        if duplicate {
+            entries.push(
+                entries
+                    .iter()
+                    .find(|entry| entry["slug"] == "gpt-5.6-terra")
+                    .unwrap()
+                    .clone(),
+            );
+        } else {
+            entries.retain(|entry| entry["slug"] != "gpt-5.6-terra");
+        }
+        fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+        let result = f.invoke("launch", &f.request);
+        assert_eq!(result.1[0]["error"]["code"], "model_catalog_invalid");
+        assert!(!f.root.path().join("calls.jsonl").exists());
+    }
 }
 
 fn output_request(f: &Fixture) -> Value {

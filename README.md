@@ -16,8 +16,10 @@ Codex-specific launch and rollout handling replace OpenCode's native boundaries.
 `codex-gpt-*` names remain equivalent aliases. Native sub-agent delegation
 remains disabled for every label.
 
-`gpt-luna-low` and `gpt-luna-max` use the same Codex adapter and five-account
-pool with `gpt-5.6-luna` and their corresponding reasoning efforts.
+`gpt-luna-{low,medium,high,xhigh,max}` and
+`gpt-terra-{low,medium,high,xhigh,max}` use the same Codex adapter and five-account
+pool with `gpt-5.6-luna` and `gpt-5.6-terra`, respectively. Each label selects its
+corresponding native reasoning effort. No family registers `ultra`.
 
 Quota probing uses the installed `~/.local/bin/chatgpt-usage` adapter against
 each selected native auth file. Standalone authentication refresh is unsupported;
@@ -49,8 +51,10 @@ Agent Runner's PTY. An unverified CLI version is rejected
 before model execution. It does not depend on app-server dynamic tools.
 
 A pinned model catalog removes metadata-forced native tools in addition to the
-feature flags. Native inventory tests verify Astra efforts and the Luna
-benchmark against a local Responses endpoint without spending model tokens.
+feature flags. Native inventory tests support every Astra, Luna, and Terra
+effort and the Luna benchmark against a local Responses endpoint without spending
+model tokens. Deterministic launch fixtures cover both invocation modes and all
+five accounts; these checks do not establish live service availability.
 The remaining built-in tools only request user input or inspect MCP resources;
 Agent Bash is the sole execution tool.
 
@@ -159,16 +163,25 @@ agents -m gpt-high -p /path/to/project 'Your task'
 Promotion backs up the five previous route files. Both label families use the
 same Codex accounts, system prompt, and Bash tool configuration.
 
-To move the existing Luna labels from OpenCode to Codex while preserving Luna
-and its low/max reasoning efforts:
+To register all five Luna efforts with Codex, including the existing low/max
+labels:
 
 ```sh
 python3 scripts/install-labels.py --luna-labels --stage-root /tmp/agent-runner-luna-labels
 python3 scripts/install-labels.py --luna-labels --stage-root /tmp/agent-runner-luna-labels --apply
 ```
 
-This backs up and replaces only `gpt-luna-low` and `gpt-luna-max`; the installer
-checks that the installed provider advertises both routes before applying them.
+To register the equivalent Terra family:
+
+```sh
+python3 scripts/install-labels.py --terra-labels --stage-root /tmp/agent-runner-terra-labels
+python3 scripts/install-labels.py --terra-labels --stage-root /tmp/agent-runner-terra-labels --apply
+```
+
+Each mode backs up existing routes in its selected family and creates missing
+efforts. The installer checks that the installed provider advertises all five
+routes before applying them. Other model families, default routing, and benchmark
+routes remain unchanged. Install the updated provider and managed catalog first.
 
 `examples/benchmark-models/codex-exec-bench.toml` is a separately named
 `gpt-5.6-luna`/`low` live-test route. Use it in isolated runner configuration; the

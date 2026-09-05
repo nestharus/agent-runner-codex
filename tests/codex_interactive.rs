@@ -52,9 +52,12 @@ with open(os.environ['CALLS'],'w') as f:
         Self { root }
     }
     fn command(&self) -> Command {
+        self.command_for("codex3")
+    }
+    fn command_for(&self, account: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"));
         command
-            .args(["interactive", "--settings-id", "codex3", "--config-root"])
+            .args(["interactive", "--settings-id", account, "--config-root"])
             .arg(self.root.path().join("config"))
             .env("HOME", self.root.path())
             .env("CALLS", self.root.path().join("calls.json"))
@@ -68,6 +71,64 @@ with open(os.environ['CALLS'],'w') as f:
     }
     fn call(&self) -> Value {
         serde_json::from_slice(&fs::read(self.root.path().join("calls.json")).unwrap()).unwrap()
+    }
+}
+
+#[test]
+fn luna_and_terra_interactive_routes_preserve_every_effort_and_account() {
+    for (family, model) in [("luna", "gpt-5.6-luna"), ("terra", "gpt-5.6-terra")] {
+        for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
+            for effort in ["low", "medium", "high", "xhigh", "max"] {
+                let f = Fixture::new();
+                fs::create_dir_all(f.root.path().join(format!(".{account}/sessions"))).unwrap();
+                fs::write(
+                    f.root.path().join("config/providers.toml"),
+                    format!("[{account}]\ntool_restrictions={{kind='codex'}}\n"),
+                )
+                .unwrap();
+                // Labels and installed legacy argument pairs must produce identical native argv.
+                let mut calls = Vec::new();
+                for args in [
+                    vec!["--model".to_string(), format!("gpt-{family}-{effort}")],
+                    vec![
+                        "-m".to_string(),
+                        model.to_string(),
+                        "-c".to_string(),
+                        format!("model_reasoning_effort=\"{effort}\""),
+                    ],
+                ] {
+                    let output = f.command_for(account).args(args).output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{account}/gpt-{family}-{effort}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let call = f.call();
+                    assert!(Path::new(call["home"].as_str().unwrap()).starts_with(
+                        f.root
+                            .path()
+                            .join(format!(".{account}/agent-runner-managed/tui"))
+                    ));
+                    let argv = call["argv"].as_array().unwrap();
+                    for expected in [
+                        model.to_string(),
+                        format!("model_reasoning_effort=\"{effort}\""),
+                        "features.shell_tool=false".to_string(),
+                        "features.multi_agent=false".to_string(),
+                        "features.plugins=false".to_string(),
+                        "features.remote_plugin=false".to_string(),
+                        "mcp_servers.agent_bash.enabled_tools=[\"bash\"]".to_string(),
+                    ] {
+                        assert!(argv.contains(&json!(expected)), "{expected}");
+                    }
+                    assert!(argv.iter().any(|value| value
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("model_instructions_file="))));
+                    calls.push(argv.clone());
+                }
+                assert_eq!(calls[0], calls[1]);
+            }
+        }
     }
 }
 
@@ -200,6 +261,14 @@ fn tui_rejects_overrides_missing_dependencies_and_wrong_account_resume() {
         vec!["--model", "gpt-low", "--model", "gpt-high"],
         vec!["--resume", "11111111-2222-3333-4444-555555555555"],
         vec!["--remote", "ws://example"],
+        vec!["--model", "gpt-luna-ultra"],
+        vec!["--model", "gpt-terra-ultra"],
+        vec![
+            "-m",
+            "gpt-5.6-terra",
+            "-c",
+            "model_reasoning_effort=\"ultra\"",
+        ],
     ] {
         let f = Fixture::new();
         assert!(!f.command().args(args).output().unwrap().status.success());

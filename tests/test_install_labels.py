@@ -10,6 +10,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[1]
 PROVIDER = REPO / 'target/debug/agent-runner-codex'
 ACCOUNTS = ['codex', 'codex2', 'codex3', 'codex4', 'codex5']
+EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 
 class LabelInstallerTests(unittest.TestCase):
@@ -33,27 +34,40 @@ class LabelInstallerTests(unittest.TestCase):
             (self.models / f'gpt-luna-{effort}.toml').write_text('# previous OpenCode route\n')
         self.untouched = self.models / 'gpt-high.toml'
         self.untouched.write_text('# existing Astra route\n')
+        (self.models / 'codex-gpt-high.toml').write_text('# existing temporary Astra route\n')
+        (self.models / 'codex-exec-bench.toml').write_text('# isolated benchmark sentinel\n')
 
-    def install(self, *extra, provider=None):
+    def install(self, *extra, provider=None, family='luna'):
         return subprocess.run([
             sys.executable, str(REPO / 'scripts/install-labels.py'),
-            '--luna-labels', '--config-root', str(self.config),
+            f'--{family}-labels', '--config-root', str(self.config),
             '--stage-root', str(self.root / 'stage'), '--provider-path', str(provider or PROVIDER),
             *extra,
         ], capture_output=True, text=True, timeout=20)
 
     def test_luna_apply_preserves_other_labels_and_backs_up_replaced_routes(self):
-        result = self.install('--apply')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.untouched.read_text(), '# existing Astra route\n')
-        self.assertEqual(sorted(p.stem for p in self.models.glob('*.toml')),
-                         ['gpt-high', 'gpt-luna-low', 'gpt-luna-max'])
+        self.assert_family_apply('luna')
+
+    def test_terra_apply_preserves_other_labels_and_backs_up_replaced_routes(self):
         for effort in ['low', 'max']:
-            route = tomllib.loads((self.models / f'gpt-luna-{effort}.toml').read_text())
+            (self.models / f'gpt-terra-{effort}.toml').write_text('# previous OpenCode route\n')
+        self.assert_family_apply('terra')
+
+    def assert_family_apply(self, family):
+        untouched = {path.name: path.read_text() for path in self.models.glob('*.toml')
+                     if not path.name.startswith(f'gpt-{family}-')}
+        result = self.install('--apply', family=family)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for filename, content in untouched.items():
+            self.assertEqual((self.models / filename).read_text(), content)
+        self.assertEqual(sorted(p.name for p in self.models.glob('*.toml')),
+                         sorted([*untouched, *(f'gpt-{family}-{effort}.toml' for effort in EFFORTS)]))
+        for effort in EFFORTS:
+            route = tomllib.loads((self.models / f'gpt-{family}-{effort}.toml').read_text())
             self.assertEqual(route['provider']['path'], str(PROVIDER))
             self.assertEqual([p['name'] for p in route['providers']], ACCOUNTS)
             for account in route['providers']:
-                expected = ['-m', 'gpt-5.6-luna', '-c', f'model_reasoning_effort="{effort}"']
+                expected = ['-m', f'gpt-5.6-{family}', '-c', f'model_reasoning_effort="{effort}"']
                 self.assertEqual(account['args'], expected)
                 self.assertEqual(account['interactive_args'], expected)
         accounts = tomllib.loads((self.config / 'providers.toml').read_text())
@@ -65,12 +79,37 @@ class LabelInstallerTests(unittest.TestCase):
             self.assertEqual(account['resume'], {'kind':'flag', 'flag':'--resume'})
             self.assertEqual(account['system_prompt_override'], 'Keep the account instructions.')
             self.assertEqual(account['tool_restrictions'], {'kind':'codex'})
-        backups = list((self.config / 'backups').glob('codex-luna-*'))
+        backups = list((self.config / 'backups').glob(f'codex-{family}-*'))
         self.assertEqual(len(backups), 1)
         self.assertEqual((backups[0] / 'providers.toml').read_text(), self.original_providers)
         for effort in ['low', 'max']:
-            self.assertEqual((backups[0] / 'models' / f'gpt-luna-{effort}.toml').read_text(),
+            self.assertEqual((backups[0] / 'models' / f'gpt-{family}-{effort}.toml').read_text(),
                              '# previous OpenCode route\n')
+        self.assertEqual(sorted(p.name for p in (backups[0] / 'models').iterdir()),
+                         [f'gpt-{family}-low.toml', f'gpt-{family}-max.toml'])
+
+    def test_missing_new_luna_route_rejects_apply_without_mutation(self):
+        self.assert_missing_route('luna', 'medium')
+
+    def test_missing_terra_route_rejects_apply_without_mutation(self):
+        self.assert_missing_route('terra', 'high')
+
+    def assert_missing_route(self, family, effort):
+        before = {path.name: path.read_text() for path in self.models.glob('*.toml')}
+        old = self.root / 'incomplete-provider'
+        missing = f'gpt-{family}-{effort}'
+        old.write_text('#!/usr/bin/env python3\nimport json,subprocess,sys\n'
+                       f'result=subprocess.run([{str(PROVIDER)!r}, *sys.argv[1:]], input=sys.stdin.read(), capture_output=True, text=True)\n'
+                       'response=json.loads(result.stdout)\n'
+                       f'response["result"]["models"]=[entry for entry in response["result"]["models"] if entry["name"] != {missing!r}]\n'
+                       'print(json.dumps(response))\n')
+        old.chmod(0o755)
+        result = self.install('--apply', provider=old, family=family)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'must advertise exactly one {missing} route', result.stderr)
+        self.assertEqual((self.config / 'providers.toml').read_text(), self.original_providers)
+        self.assertEqual({path.name: path.read_text() for path in self.models.glob('*.toml')}, before)
+        self.assertFalse((self.config / 'backups').exists())
 
     def test_missing_luna_discovery_rejects_apply_without_mutation(self):
         old = self.root / 'old-provider'

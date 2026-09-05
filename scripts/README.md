@@ -83,16 +83,33 @@ advertise every target label with the exact selected model, reasoning arguments,
 and all five eligible accounts. Install the updated provider first when
 promoting the standard labels.
 
-To migrate the existing `gpt-luna-low` and `gpt-luna-max` labels to Codex:
+To register `gpt-luna-low`, `gpt-luna-medium`, `gpt-luna-high`, `gpt-luna-xhigh`,
+and `gpt-luna-max` with Codex:
 
 ```bash
 python3 scripts/install-labels.py --luna-labels --stage-root /tmp/codex-luna-labels
 python3 scripts/install-labels.py --luna-labels --stage-root /tmp/codex-luna-labels --apply
 ```
 
-This mode preserves `gpt-5.6-luna` and its low/max efforts and uses all five
-Codex accounts. It saves replaced routes under `backups/codex-luna-*/models/`.
-It cannot be combined with `--standard-labels`.
+This mode uses `gpt-5.6-luna` with the matching effort and all five Codex accounts.
+It creates missing routes and saves replaced routes under
+`backups/codex-luna-*/models/`.
+
+To register `gpt-terra-low`, `gpt-terra-medium`, `gpt-terra-high`,
+`gpt-terra-xhigh`, and `gpt-terra-max` with `gpt-5.6-terra`:
+
+```bash
+python3 scripts/install-labels.py --terra-labels --stage-root /tmp/codex-terra-labels
+python3 scripts/install-labels.py --terra-labels --stage-root /tmp/codex-terra-labels --apply
+```
+
+Terra uses the same account pool and saves replaced routes under
+`backups/codex-terra-*/models/`. Neither family includes `ultra`.
+`--luna-labels`, `--terra-labels`, and `--standard-labels` are mutually exclusive;
+apply the desired families separately after installing the updated provider and
+managed catalog. Each mode requires every selected route to be advertised before
+it changes any installed configuration, and preserves unrelated labels and the
+configured default provider.
 
 `benchmark-models/codex-exec-bench.toml` is generated separately and never
 installed into production routing. It uses `gpt-5.6-luna` at low reasoning for

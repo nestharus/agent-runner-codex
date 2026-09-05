@@ -3,6 +3,70 @@ use serde_json::{json, Value};
 use std::{fs, path::Path};
 
 #[test]
+fn discovery_registers_exact_efforts_models_and_accounts() {
+    let request = json!({"contract":"oulipoly.provider/v1","request_id":"model-routes","host":{"app":"contract-test"},"params":{}});
+    let mut output = Vec::new();
+    assert_eq!(
+        write_invocation(
+            &["agent-runner-codex".into(), "discovery.models".into()],
+            &serde_json::to_vec(&request).unwrap(),
+            &mut output
+        ),
+        0
+    );
+    let response: Value = serde_json::from_slice(&output).unwrap();
+    let entries = response["result"]["models"].as_array().unwrap();
+    assert_eq!(entries.len(), 20);
+    let metadata: Value =
+        serde_json::from_str(include_str!("../integrations/codex/models.json")).unwrap();
+    for (prefix, model) in [
+        ("gpt-", "gpt-6-astra"),
+        ("codex-gpt-", "gpt-6-astra"),
+        ("gpt-luna-", "gpt-5.6-luna"),
+        ("gpt-terra-", "gpt-5.6-terra"),
+    ] {
+        let native = metadata["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["slug"] == model)
+            .unwrap();
+        let levels: Vec<_> = native["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap())
+            .collect();
+        assert_eq!(levels, ["low", "medium", "high", "xhigh", "max"]);
+        for effort in levels {
+            let name = format!("{prefix}{effort}");
+            let matches: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry["name"] == name)
+                .collect();
+            assert_eq!(matches.len(), 1, "{name}");
+            assert_eq!(matches[0]["provider_model"], model);
+            assert_eq!(
+                matches[0]["provider_args"],
+                json!([
+                    "-m",
+                    model,
+                    "-c",
+                    format!("model_reasoning_effort=\"{effort}\"")
+                ])
+            );
+            assert_eq!(
+                matches[0]["eligible_accounts"],
+                json!(["codex", "codex2", "codex3", "codex4", "codex5"])
+            );
+        }
+    }
+    assert!(!entries
+        .iter()
+        .any(|entry| entry["name"] == "codex-exec-bench"));
+}
+
+#[test]
 fn control_plane_responses_match_the_copied_host_contracts() {
     let temporary = tempfile::tempdir().unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("contract/v1");
