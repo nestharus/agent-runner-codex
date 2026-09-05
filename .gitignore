@@ -1,0 +1,5 @@
+/target/
+/_agent_prompt_*.md
+/agents-orchestrator.log
+/.tmp/
+.s9b-step6a-contract.md
