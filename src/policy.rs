@@ -1,752 +1,296 @@
-//! Declared roles: validator, mapper, formatter, parser, filter, predicate
-
-use crate::account::profile_for_wrapper_reference;
-use crate::activity::ActivityTargets;
-use crate::envelope::{HostContext, ProviderFailure};
-use crate::models::{model_alias, provider_args_match, ModelAlias};
-use crate::runtime_selection::{resolve_runtime_selection, RuntimeSelection};
+//! Codex owns model, prompt, tool, and account selection before native execution.
+use crate::envelope::{HostContext, ProviderFailure, RequestEnvelope};
+use crate::{account, models};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
-#[derive(Deserialize)]
-struct PolicyEvaluateWireParams {
-    settings_id: String,
-    mode: String,
-    model: PolicyModelRequest,
-    launch: PolicyLaunchInput,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConfig {
+    pub codex_bin: PathBuf,
+    pub bun_bin: PathBuf,
+    pub bash_mcp_path: PathBuf,
+    pub system_prompt_file: PathBuf,
+    pub agent_bash_bin: PathBuf,
+    pub agent_runner_bin: PathBuf,
 }
 
-#[derive(Clone, Deserialize)]
-pub(crate) struct PolicyModelRequest {
-    name: String,
-    provider_args: Vec<String>,
-    inputs: ModelInputs,
+impl RuntimeConfig {
+    pub fn load(host: &HostContext) -> Result<Self, ProviderFailure> {
+        let user = account::user_home(host)?;
+        let root = host
+            .config_root
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| user.join(".config/oulipoly-agent-runner"));
+        let install = root.join("agent-runner-codex");
+        let path = install.join("config.toml");
+        let config = if path.is_file() {
+            let bytes = crate::durable_fs::read_file_bounded(&path, 64 * 1024).map_err(|_| {
+                invalid(
+                    "runtime_config_unreadable",
+                    "Cannot read bounded Codex provider configuration",
+                )
+            })?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                invalid(
+                    "runtime_config_invalid",
+                    "Codex provider configuration must be UTF-8",
+                )
+            })?;
+            toml::from_str(text).map_err(|_| {
+                invalid(
+                    "runtime_config_invalid",
+                    "Invalid Codex provider configuration",
+                )
+            })?
+        } else {
+            Self {
+                codex_bin: user.join(".npm-global/bin/codex"),
+                bun_bin: user.join(".bun/bin/bun"),
+                bash_mcp_path: install.join("integrations/codex/agent-bash-mcp.ts"),
+                system_prompt_file: user.join("ai/AGENTS.md"),
+                agent_bash_bin: root.join("agent-bash/agent-bash"),
+                agent_runner_bin: root.join("runner/oulipoly-agent-runner"),
+            }
+        };
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ProviderFailure> {
+        for (name, path) in [
+            ("codex_bin", &self.codex_bin),
+            ("bun_bin", &self.bun_bin),
+            ("bash_mcp_path", &self.bash_mcp_path),
+            ("system_prompt_file", &self.system_prompt_file),
+            ("agent_bash_bin", &self.agent_bash_bin),
+            ("agent_runner_bin", &self.agent_runner_bin),
+        ] {
+            if !path.is_absolute() || !path.is_file() {
+                return Err(invalid(
+                    "runtime_dependency_missing",
+                    &format!(
+                        "{name} must name an existing absolute file: {}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        let catalog = self.bash_mcp_path.parent().unwrap().join("models.json");
+        let catalog_bytes = crate::durable_fs::read_file_bounded(&catalog, 4 * 1024 * 1024)
+            .map_err(|_| {
+                invalid(
+                    "model_catalog_unreadable",
+                    "Cannot read the required managed Codex model catalog",
+                )
+            })?;
+        let catalog_json: Value = serde_json::from_slice(&catalog_bytes).map_err(|_| {
+            invalid(
+                "model_catalog_invalid",
+                "The managed Codex model catalog must be valid JSON",
+            )
+        })?;
+        let entries = catalog_json
+            .get("models")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                invalid(
+                    "model_catalog_invalid",
+                    "The managed Codex model catalog must contain models",
+                )
+            })?;
+        for slug in ["gpt-6-astra", "gpt-5.6-luna"] {
+            let matching: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry["slug"] == slug)
+                .collect();
+            if matching.len() != 1 {
+                return Err(invalid(
+                    "model_catalog_invalid",
+                    "The managed Codex model catalog must uniquely define every supported model",
+                ));
+            }
+            let entry = matching[0];
+            if ["apply_patch_tool_type", "tool_mode", "multi_agent_version"]
+                .iter()
+                .any(|key| entry.get(*key) != Some(&Value::Null))
+                || entry.get("node_repl_disabled") != Some(&Value::Bool(true))
+                || entry.get("supports_search_tool") != Some(&Value::Bool(false))
+                || !entry
+                    .get("experimental_supported_tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+            {
+                return Err(invalid("model_catalog_tools_unrestricted", "The managed Codex model catalog must disable native tool overrides for every supported model"));
+            }
+        }
+        let prompt = crate::durable_fs::read_file_bounded(&self.system_prompt_file, 1024 * 1024)
+            .map_err(|_| {
+                invalid(
+                    "system_prompt_unreadable",
+                    "Cannot read the bounded configured system prompt",
+                )
+            })?;
+        if prompt.is_empty() || prompt.len() > 1024 * 1024 || std::str::from_utf8(&prompt).is_err()
+        {
+            return Err(invalid(
+                "system_prompt_invalid",
+                "System prompt must be nonempty UTF-8, at most 1 MiB",
+            ));
+        }
+        Ok(())
+    }
 }
 
-#[derive(Clone, Deserialize)]
-struct ModelInputs {
-    prompt: Option<String>,
-    #[serde(rename = "named")]
-    _named: BTreeMap<String, Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct PolicyLaunchInput {
-    argv: Option<Vec<String>>,
-    env: Option<BTreeMap<String, String>>,
-    stdin: Option<String>,
-    system_prompt_override: Option<String>,
-    tool_restrictions: Option<Value>,
-}
-
-struct PolicyInput {
-    settings_id: String,
-    mode: String,
-    model: PolicyModelRequest,
-    launch: PolicyLaunchInput,
-}
-
-pub(crate) struct PolicyLaunchRequest {
+#[derive(Clone, Debug)]
+pub struct Plan {
     pub settings_id: String,
-    pub mode: String,
-    pub model: PolicyModelRequest,
-    pub argv: Vec<String>,
-    pub env: Option<BTreeMap<String, String>>,
-    pub stdin: Option<String>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct PolicyDiagnostic {
-    severity: &'static str,
-    code: &'static str,
-    message: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct PolicyMarker {
-    name: &'static str,
-    value: PolicyMarkerValue,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum PolicyMarkerValue {
-    Text(String),
-    Strings(Vec<String>),
-}
-
-pub(crate) struct PolicyLaunchPlan {
-    pub argv: Vec<String>,
-    pub env: BTreeMap<String, String>,
-    pub stdin: Option<String>,
-    pub prompt: Option<String>,
-    pub diagnostics: Vec<PolicyDiagnostic>,
-    pub markers: Vec<PolicyMarker>,
-    pub route: PolicyRouteIdentity,
-}
-
-pub(crate) struct PolicyRejection {
-    argv: Vec<String>,
-    env: BTreeMap<String, String>,
-    stdin: Option<String>,
-    prompt: Option<String>,
-    diagnostics: Vec<PolicyDiagnostic>,
-    markers: Vec<PolicyMarker>,
-    selection: PolicySelectionIdentity,
-}
-
-#[derive(Clone)]
-pub(crate) struct PolicyRouteIdentity {
-    pub settings_record_id: String,
-    pub account_wrapper: String,
-    pub model_alias: String,
-    pub provider_id: String,
-    pub model_id: String,
+    pub model: String,
     pub effort: String,
+    pub prompt: String,
+    pub env: BTreeMap<String, String>,
+    pub argv: Vec<String>,
 }
 
-struct PolicySelectionIdentity {
-    settings_record_id: String,
-    account_wrapper: String,
-}
-
-pub(crate) enum PolicyDecision {
-    Accepted(PolicyLaunchPlan),
-    Rejected(PolicyRejection),
-}
-
-struct PolicyPlanCandidate {
-    argv: Vec<String>,
-    env: BTreeMap<String, String>,
-    stdin: Option<String>,
-    prompt: Option<String>,
-    diagnostics: Vec<PolicyDiagnostic>,
-    markers: Vec<PolicyMarker>,
-}
-
-#[derive(Serialize)]
-struct PolicyEvaluateWireResult {
-    accepted: bool,
-    argv: Vec<String>,
-    env: BTreeMap<String, String>,
-    stdin: Option<String>,
-    prompt: Option<String>,
-    diagnostics: Vec<PolicyDiagnostic>,
-    markers: Vec<PolicyMarker>,
-}
-
-pub fn evaluate_params(
-    host: &HostContext,
-    params: Value,
-    request_id: &str,
-) -> Result<Value, ProviderFailure> {
-    evaluate_params_with_activity(host, params, request_id).map(|(result, _)| result)
-}
-
-pub(crate) fn evaluate_params_with_activity(
-    host: &HostContext,
-    params: Value,
-    request_id: &str,
-) -> Result<(Value, ActivityTargets), ProviderFailure> {
-    let wire = parse_policy_params(params, request_id)?;
-    let decision = evaluate(host, wire.into(), request_id)?;
-    let targets = decision.activity_targets();
-    Ok((project_policy_result(decision), targets))
-}
-
-pub(crate) fn attempted_activity_targets(params: &Value) -> ActivityTargets {
-    let mut targets = ActivityTargets::default();
+pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, ProviderFailure> {
+    let params = &request.params;
     let settings_id = params
         .get("settings_id")
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    if let Some(settings_id) = settings_id {
-        targets.attempted("settings_record", settings_id, "params.settings_id");
-    }
-    if let Some(name) = params
+        .ok_or_else(|| invalid("missing_settings_id", "settings_id is required"))?;
+    let codex_home = account::home(&request.host, settings_id)?;
+    let name = params
         .pointer("/model/name")
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        targets.attempted("model_alias", name, "params.model.name");
-    }
-    if let Some(provider_args) = params.pointer("/model/provider_args") {
-        targets.provider_args(provider_args);
-    }
-    targets
-}
-
-pub(crate) fn evaluate_launch(
-    host: &HostContext,
-    request: PolicyLaunchRequest,
-    request_id: &str,
-) -> Result<PolicyDecision, ProviderFailure> {
-    evaluate(
-        host,
-        PolicyInput {
-            settings_id: request.settings_id,
-            mode: request.mode,
-            model: request.model,
-            launch: PolicyLaunchInput {
-                argv: Some(request.argv),
-                env: request.env,
-                stdin: request.stdin,
-                system_prompt_override: None,
-                tool_restrictions: None,
-            },
-        },
-        request_id,
+        .unwrap_or("");
+    let (model, effort) = models::route(name).ok_or_else(|| {
+        invalid(
+            "unknown_model",
+            "Select a codex-gpt-* label or the separately named Codex benchmark",
+        )
+    })?;
+    let provider_args: Vec<String> = serde_json::from_value(
+        params
+            .pointer("/model/provider_args")
+            .cloned()
+            .unwrap_or(Value::Null),
     )
-}
-
-fn evaluate(
-    host: &HostContext,
-    params: PolicyInput,
-    request_id: &str,
-) -> Result<PolicyDecision, ProviderFailure> {
-    let selection = resolve_runtime_selection(host, &params.settings_id, request_id)?;
-    let model = resolved_model(&params);
-    let diagnostics = diagnostics_for_policy(&params, &selection, model);
-    let plan = policy_plan_candidate(&params, &selection, model, diagnostics);
-    match model {
-        Some(model) if policy_accepted(&plan.diagnostics) => Ok(PolicyDecision::Accepted(
-            plan.into_accepted(&selection, model),
-        )),
-        _ => Ok(PolicyDecision::Rejected(plan.into_rejection(&selection))),
+    .map_err(|_| invalid("invalid_model_args", "model.provider_args must be an array"))?;
+    if provider_args != models::args(model, effort) {
+        return Err(invalid(
+            "model_args_mismatch",
+            "Model arguments do not match the selected catalog label",
+        ));
     }
-}
-
-fn policy_plan_candidate(
-    params: &PolicyInput,
-    selection: &RuntimeSelection,
-    model: Option<&ModelAlias>,
-    diagnostics: Vec<PolicyDiagnostic>,
-) -> PolicyPlanCandidate {
-    PolicyPlanCandidate {
-        argv: effective_argv(params, model),
-        env: effective_env(params.launch.env.as_ref()),
-        stdin: params.launch.stdin.clone(),
-        prompt: params.model.inputs.prompt.clone(),
-        diagnostics,
-        markers: policy_markers(configured_launch_command(params), params, selection, model),
+    if !matches!(
+        params.get("mode").and_then(Value::as_str),
+        Some("arg" | "stdin")
+    ) {
+        return Err(invalid(
+            "unsupported_mode",
+            "Codex provider supports noninteractive arg and stdin modes",
+        ));
     }
-}
-
-fn project_policy_result(decision: PolicyDecision) -> Value {
-    json!(PolicyEvaluateWireResult::from(decision))
-}
-
-fn policy_accepted(diagnostics: &[PolicyDiagnostic]) -> bool {
-    !diagnostics.iter().any(PolicyDiagnostic::is_error)
-}
-
-fn parse_policy_params(
-    params: Value,
-    request_id: &str,
-) -> Result<PolicyEvaluateWireParams, ProviderFailure> {
-    serde_json::from_value(params).map_err(|err| invalid_policy_params_failure(request_id, err))
-}
-
-impl From<PolicyEvaluateWireParams> for PolicyInput {
-    fn from(wire: PolicyEvaluateWireParams) -> Self {
-        Self {
-            settings_id: wire.settings_id,
-            mode: wire.mode,
-            model: wire.model,
-            launch: wire.launch,
-        }
+    let launch = if is_policy { &params["launch"] } else { params };
+    let prompt = params
+        .pointer("/model/inputs/prompt")
+        .and_then(Value::as_str)
+        .or_else(|| launch.get("prompt").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    if prompt.is_empty() {
+        return Err(invalid("missing_prompt", "A nonempty prompt is required"));
     }
-}
-
-impl PolicyDiagnostic {
-    fn is_error(&self) -> bool {
-        self.severity == "error"
-    }
-}
-
-impl PolicyPlanCandidate {
-    fn into_accepted(self, selection: &RuntimeSelection, model: &ModelAlias) -> PolicyLaunchPlan {
-        let route = resolved_route_identity(selection, model);
-        PolicyLaunchPlan {
-            argv: self.argv,
-            env: self.env,
-            stdin: self.stdin,
-            prompt: self.prompt,
-            diagnostics: self.diagnostics,
-            markers: self.markers,
-            route,
-        }
-    }
-
-    fn into_rejection(self, selection: &RuntimeSelection) -> PolicyRejection {
-        PolicyRejection {
-            argv: self.argv,
-            env: self.env,
-            stdin: self.stdin,
-            prompt: self.prompt,
-            diagnostics: self.diagnostics,
-            markers: self.markers,
-            selection: PolicySelectionIdentity {
-                settings_record_id: selection.settings_id.clone(),
-                account_wrapper: selection.account.opencode_wrapper.to_string(),
-            },
-        }
-    }
-}
-
-impl PolicyDecision {
-    fn activity_targets(&self) -> ActivityTargets {
-        let mut targets = ActivityTargets::default();
-        match self {
-            Self::Accepted(plan) => append_route_activity_targets(&mut targets, &plan.route),
-            Self::Rejected(plan) => {
-                targets.resolved(
-                    "settings_record",
-                    plan.selection.settings_record_id.clone(),
-                    "policy.selection.settings_record",
-                );
-                targets.resolved(
-                    "account",
-                    plan.selection.account_wrapper.clone(),
-                    "policy.selection.account",
-                );
-            }
-        }
-        targets
-    }
-}
-
-pub(crate) fn append_route_activity_targets(
-    targets: &mut ActivityTargets,
-    route: &PolicyRouteIdentity,
-) {
-    targets.resolved(
-        "settings_record",
-        route.settings_record_id.clone(),
-        "policy.route.settings_record",
-    );
-    targets.resolved(
-        "account",
-        route.account_wrapper.clone(),
-        "policy.route.account",
-    );
-    targets.resolved(
-        "provider_model",
-        format!("{}/{}", route.provider_id, route.model_id),
-        "policy.route.provider_model",
-    );
-    targets.resolved(
-        "model_alias",
-        route.model_alias.clone(),
-        "policy.route.model_alias",
-    );
-    targets.resolved("effort", route.effort.clone(), "policy.route.effort");
-}
-
-impl PolicyRejection {
-    pub(crate) fn diagnostics_json(&self) -> Value {
-        json!(self.diagnostics)
-    }
-}
-
-impl From<PolicyDecision> for PolicyEvaluateWireResult {
-    fn from(decision: PolicyDecision) -> Self {
-        match decision {
-            PolicyDecision::Accepted(plan) => Self {
-                accepted: true,
-                argv: plan.argv,
-                env: plan.env,
-                stdin: plan.stdin,
-                prompt: plan.prompt,
-                diagnostics: plan.diagnostics,
-                markers: plan.markers,
-            },
-            PolicyDecision::Rejected(plan) => Self {
-                accepted: false,
-                argv: plan.argv,
-                env: plan.env,
-                stdin: plan.stdin,
-                prompt: plan.prompt,
-                diagnostics: plan.diagnostics,
-                markers: plan.markers,
-            },
-        }
-    }
-}
-
-fn resolved_route_identity(
-    selection: &RuntimeSelection,
-    model: &ModelAlias,
-) -> PolicyRouteIdentity {
-    let (provider_id, model_id) = model
-        .provider_model
-        .split_once('/')
-        .expect("catalog provider model includes provider and model ids");
-    PolicyRouteIdentity {
-        settings_record_id: selection.settings_id.clone(),
-        account_wrapper: selection.account.opencode_wrapper.to_string(),
-        model_alias: model.name.to_string(),
-        provider_id: provider_id.to_string(),
-        model_id: model_id.to_string(),
-        effort: model.effort.to_string(),
-    }
-}
-
-fn effective_argv(params: &PolicyInput, model: Option<&ModelAlias>) -> Vec<String> {
-    let Some(prefix) = configured_launch_prefix(params) else {
-        return params.launch.argv.clone().unwrap_or_default();
-    };
-    let Some(model) = model else {
-        return params.launch.argv.clone().unwrap_or_default();
-    };
-    let mut argv = prefix.to_vec();
-    argv.extend(model.policy_effective_args());
-    argv.extend(policy_launch_args(params, Some(model)));
-    argv
-}
-
-fn configured_launch_command(params: &PolicyInput) -> Option<&str> {
-    configured_launch_prefix(params)
-        .and_then(|prefix| prefix.first())
-        .map(String::as_str)
-}
-
-fn configured_launch_prefix(params: &PolicyInput) -> Option<&[String]> {
-    let argv = params.launch.argv.as_deref()?;
-    let run_index = argv.iter().position(|arg| arg == "run")?;
-    let prefix = &argv[..run_index];
-    valid_launch_command_prefix(prefix).then_some(prefix)
-}
-
-fn valid_launch_command_prefix(prefix: &[String]) -> bool {
-    let Some((command, options)) = prefix.split_first() else {
-        return false;
-    };
-    intrinsic_host_launch_command(command) && options.iter().all(|arg| arg == "--pure")
-}
-
-fn resolved_model(params: &PolicyInput) -> Option<&'static ModelAlias> {
-    model_alias(&params.model.name)
-        .filter(|model| provider_args_match(model, &params.model.provider_args))
-}
-
-fn effective_env(input: Option<&BTreeMap<String, String>>) -> BTreeMap<String, String> {
-    input.cloned().unwrap_or_default()
-}
-
-fn diagnostics_for_policy(
-    params: &PolicyInput,
-    selection: &RuntimeSelection,
-    model: Option<&ModelAlias>,
-) -> Vec<PolicyDiagnostic> {
-    let mut diagnostics = launch_command_diagnostics(params, selection);
-    if model.is_none() {
-        diagnostics.push(invalid_model_diagnostic(params));
-    } else if selection.exact_model().is_some() && selection.exact_model() != model {
-        diagnostics.push(settings_model_mismatch_diagnostic(selection, model));
-    }
-    if model.is_some_and(|model| !model.supports_account(selection.account)) {
-        diagnostics.push(model_account_ineligible_diagnostic(selection, model));
-    }
-    if params.launch.system_prompt_override.is_some() {
-        diagnostics.push(unsupported_system_prompt_override_diagnostic());
-    }
-    if params.launch.tool_restrictions.is_some() {
-        diagnostics.push(unsupported_tool_restrictions_diagnostic());
-    }
-    // A malformed command prefix cannot be stripped from the host candidate
-    // safely. Treating the whole argv as caller-owned in that case produces a
-    // cascade of misleading forbidden-flag diagnostics for provider-managed
-    // arguments. Report the command defect first; flag diagnostics become
-    // meaningful only after the logical wrapper prefix is valid.
-    if configured_launch_command(params).is_some() {
-        diagnostics.extend(forbidden_argv_diagnostics(&policy_launch_args(
-            params, model,
-        )));
-    }
-    diagnostics
-}
-
-fn unsupported_system_prompt_override_diagnostic() -> PolicyDiagnostic {
-    diagnostic(
-        "error",
-        "unsupported_system_prompt_override",
-        "OpenCode cannot faithfully enforce the configured system_prompt_override; refusing launch without the owner's prompt policy"
-            .to_string(),
-    )
-}
-
-fn unsupported_tool_restrictions_diagnostic() -> PolicyDiagnostic {
-    diagnostic(
-        "error",
-        "unsupported_tool_restrictions",
-        "OpenCode cannot faithfully enforce the configured tool_restrictions; refusing unrestricted launch"
-            .to_string(),
-    )
-}
-
-fn model_account_ineligible_diagnostic(
-    selection: &RuntimeSelection,
-    requested: Option<&ModelAlias>,
-) -> PolicyDiagnostic {
-    diagnostic(
-        "error",
-        "model_account_ineligible",
-        format!(
-            "model {} is not eligible for account {} selected by settings record {} ({})",
-            requested.map(|model| model.name).unwrap_or("<invalid>"),
-            selection.account.opencode_wrapper,
-            selection.settings_id,
-            selection.evidence_label(),
-        ),
-    )
-}
-
-fn invalid_model_diagnostic(params: &PolicyInput) -> PolicyDiagnostic {
-    diagnostic(
-        "error",
-        "invalid_model",
-        format!(
-            "model {} must use the exact provider args advertised by discovery.models",
-            params.model.name
-        ),
-    )
-}
-
-fn launch_command_diagnostics(
-    params: &PolicyInput,
-    selection: &RuntimeSelection,
-) -> Vec<PolicyDiagnostic> {
-    let Some(command) = configured_launch_command(params) else {
-        let observed = params
-            .launch
-            .argv
-            .as_deref()
-            .and_then(|argv| argv.first())
-            .map(|command| format!("\"{command}\""))
-            .unwrap_or_else(|| "<missing>".to_string());
-        return vec![diagnostic(
-            "error",
-            "invalid_command",
-            format!(
-                "settings record {} selects account {}, but launch command {observed} is not its exact logical wrapper; configure this route with command = \"{}\"",
-                selection.settings_id,
-                selection.account.opencode_wrapper,
-                selection.account.opencode_wrapper,
-            ),
-        )];
-    };
-    if command == selection.account.opencode_wrapper {
-        return Vec::new();
-    }
-    vec![diagnostic(
-        "error",
-        "settings_command_mismatch",
-        format!(
-            "launch command must resolve to account {} selected by settings record {} ({})",
-            selection.account.opencode_wrapper,
-            selection.settings_id,
-            selection.evidence_label(),
-        ),
-    )]
-}
-
-fn settings_model_mismatch_diagnostic(
-    selection: &RuntimeSelection,
-    requested: Option<&ModelAlias>,
-) -> PolicyDiagnostic {
-    diagnostic(
-        "error",
-        "settings_model_mismatch",
-        format!(
-            "model {} does not match the route stored by settings record {} ({})",
-            requested.map(|model| model.name).unwrap_or("<invalid>"),
-            selection.settings_id,
-            selection.evidence_label(),
-        ),
-    )
-}
-
-fn forbidden_argv_diagnostics(input: &[String]) -> Vec<PolicyDiagnostic> {
-    forbidden_launch_args(input)
-        .into_iter()
-        .map(forbidden_arg_diagnostic)
-        .collect()
-}
-
-fn policy_launch_args(params: &PolicyInput, model: Option<&ModelAlias>) -> Vec<String> {
-    let argv = params.launch.argv.as_deref().unwrap_or_default();
-    stripped_policy_launch_args(argv, model)
-        .unwrap_or(argv)
-        .to_vec()
-}
-
-fn stripped_policy_launch_args<'a>(
-    argv: &'a [String],
-    model: Option<&ModelAlias>,
-) -> Option<&'a [String]> {
-    let model = model?;
-    strip_host_candidate_prefix(argv, model).or_else(|| strip_policy_effective_prefix(argv, model))
-}
-
-fn strip_host_candidate_prefix<'a>(argv: &'a [String], model: &ModelAlias) -> Option<&'a [String]> {
-    strip_intrinsic_launch_prefix(argv, &host_candidate_args(model))
-}
-
-fn strip_policy_effective_prefix<'a>(
-    argv: &'a [String],
-    model: &ModelAlias,
-) -> Option<&'a [String]> {
-    strip_intrinsic_launch_prefix(argv, &policy_effective_args(model))
-}
-
-fn strip_intrinsic_launch_prefix<'a>(
-    argv: &'a [String],
-    args_after_command: &[String],
-) -> Option<&'a [String]> {
-    let run_index = argv.iter().position(|arg| arg == "run")?;
-    if !valid_launch_command_prefix(&argv[..run_index])
-        || !argv[run_index..].starts_with(args_after_command)
-    {
-        return None;
-    }
-    Some(&argv[run_index + args_after_command.len()..])
-}
-
-fn host_candidate_args(model: &ModelAlias) -> Vec<String> {
-    model.host_candidate_args()
-}
-
-fn policy_effective_args(model: &ModelAlias) -> Vec<String> {
-    model.policy_effective_args()
-}
-
-fn is_forbidden_launch_arg(arg: &str) -> bool {
-    intrinsic_host_launch_command(arg)
-        || (arg.starts_with('-') && arg != "-" && !is_caller_owned_launch_option(arg))
-}
-
-fn is_caller_owned_launch_option(arg: &str) -> bool {
-    const LONG_OPTIONS: &[&str] = &[
-        "--file",
-        "--log-level",
-        "--print-logs",
-        "--share",
-        "--thinking",
-        "--title",
+    let supplied: Vec<String> =
+        serde_json::from_value(launch.get("argv").cloned().unwrap_or(Value::Null))
+            .map_err(|_| invalid("invalid_argv", "argv must be an array"))?;
+    let mut canonical = vec![
+        settings_id.to_string(),
+        "exec".into(),
+        "--dangerously-bypass-approvals-and-sandbox".into(),
     ];
-    const NEGATED_LONG_OPTIONS: &[&str] = &["--no-print-logs", "--no-share", "--no-thinking"];
-
-    LONG_OPTIONS.iter().any(|option| {
-        arg == *option
-            || arg
-                .strip_prefix(option)
-                .is_some_and(|suffix| suffix.starts_with('='))
-    }) || NEGATED_LONG_OPTIONS.iter().any(|option| {
-        arg == *option
-            || arg
-                .strip_prefix(option)
-                .is_some_and(|suffix| suffix.starts_with('='))
-    }) || arg == "-f"
-        || (arg.len() > 2 && arg.starts_with("-f"))
-}
-
-pub(crate) fn forbidden_user_launch_arg<'a>(
-    model: &PolicyModelRequest,
-    argv: &'a [String],
-) -> Option<&'a str> {
-    let model = model_alias(&model.name)
-        .filter(|candidate| provider_args_match(candidate, &model.provider_args))?;
-    stripped_policy_launch_args(argv, Some(model))?
-        .iter()
-        .take_while(|arg| arg.as_str() != "--")
-        .map(String::as_str)
-        .find(|arg| is_forbidden_launch_arg(arg))
-}
-
-fn intrinsic_host_launch_command(command: &str) -> bool {
-    profile_for_wrapper_reference(command)
-        .is_some_and(|account| command == account.opencode_wrapper)
-}
-
-fn diagnostic(severity: &'static str, code: &'static str, message: String) -> PolicyDiagnostic {
-    PolicyDiagnostic {
-        severity,
-        code,
-        message,
+    canonical.extend(provider_args);
+    let mut with_prompt = canonical.clone();
+    with_prompt.push(prompt.clone());
+    if supplied != canonical && supplied != with_prompt {
+        return Err(invalid("unmanaged_argv", "Launch arguments must match the selected Codex route; additional runtime, model, or tool overrides are not allowed"));
     }
-}
-
-fn policy_markers(
-    command: Option<&str>,
-    params: &PolicyInput,
-    selection: &RuntimeSelection,
-    model: Option<&ModelAlias>,
-) -> Vec<PolicyMarker> {
-    vec![
-        marker("opencode.command", command.unwrap_or("")),
-        marker("opencode.mode", &params.mode),
-        marker("opencode.settings_record_id", &selection.settings_id),
-        marker(
-            "opencode.settings_record_identity",
-            &selection.evidence_label(),
-        ),
-        marker("opencode.account", selection.account.opencode_wrapper),
-        marker("opencode.account_hash", selection.account.account_hash),
-        marker(
-            "opencode.model_alias",
-            model.map(|model| model.name).unwrap_or(""),
-        ),
-        marker(
-            "opencode.provider_model",
-            model.map(|model| model.provider_model).unwrap_or(""),
-        ),
-        marker(
-            "opencode.effort",
-            model.map(|model| model.effort).unwrap_or(""),
-        ),
-        string_list_marker(
-            "opencode.attempted_provider_args",
-            params.model.provider_args.clone(),
-        ),
-    ]
-}
-
-fn marker(name: &'static str, value: &str) -> PolicyMarker {
-    PolicyMarker {
-        name,
-        value: PolicyMarkerValue::Text(value.to_string()),
+    if let Some(restrictions) = launch.get("tool_restrictions").filter(|v| !v.is_null()) {
+        if restrictions.get("kind").and_then(Value::as_str) != Some("codex")
+            || restrictions.as_object().is_none_or(|m| {
+                m.iter().any(|(k, v)| {
+                    k != "kind"
+                        && !v.as_object().is_some_and(|m| m.is_empty())
+                        && !v.as_array().is_some_and(|a| a.is_empty())
+                })
+            })
+        {
+            return Err(invalid(
+                "unsupported_tool_restrictions",
+                "The managed Codex provider enforces its sole Agent Bash tool policy",
+            ));
+        }
     }
-}
-
-fn string_list_marker(name: &'static str, value: Vec<String>) -> PolicyMarker {
-    PolicyMarker {
-        name,
-        value: PolicyMarkerValue::Strings(value),
-    }
-}
-
-fn invalid_policy_params_failure(request_id: &str, err: serde_json::Error) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "invalid_policy_params",
-        format!("policy.evaluate params are invalid: {err}"),
+    let mut env: BTreeMap<String, String> = serde_json::from_value(
+        launch
+            .get("env")
+            .cloned()
+            .filter(|v| !v.is_null())
+            .unwrap_or(json!({})),
     )
+    .map_err(|_| invalid("invalid_env", "env must map names to strings"))?;
+    for entries in [Some(&env), request.host.env.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if entries
+            .iter()
+            .any(|(key, value)| key.is_empty() || key.contains(['=', '\0']) || value.contains('\0'))
+        {
+            return Err(invalid(
+                "invalid_env",
+                "Environment names and values must be valid process environment entries",
+            ));
+        }
+    }
+    env.insert("CODEX_HOME".into(), codex_home.display().to_string());
+    if is_policy {
+        if let Some(instructions) = launch
+            .get("system_prompt_override")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            env.insert(
+                "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS".into(),
+                instructions.into(),
+            );
+        }
+    }
+    Ok(Plan {
+        settings_id: settings_id.into(),
+        model: model.into(),
+        effort: effort.into(),
+        prompt,
+        env,
+        argv: canonical,
+    })
 }
 
-fn forbidden_launch_args(input: &[String]) -> Vec<&String> {
-    input
-        .iter()
-        .take_while(|arg| arg.as_str() != "--")
-        .filter(|arg| is_forbidden_launch_arg(arg))
-        .collect()
+pub fn evaluate(request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
+    match plan(request, true).and_then(|plan| {
+        RuntimeConfig::load(&request.host)?.validate()?;
+        Ok(plan)
+    }) {
+        Ok(plan) => Ok(json!({"accepted": true, "argv": plan.argv, "env": plan.env,
+            "stdin": plan.prompt, "prompt": plan.prompt, "diagnostics": [],
+            "markers": [{"name":"codex.route", "value":{"account":plan.settings_id,"model":plan.model,"effort":plan.effort}}]})),
+        Err(error) => Ok(
+            json!({"accepted": false, "diagnostics": [{"severity":"error", "code":error.code,"message":error.message}], "markers":[]}),
+        ),
+    }
 }
 
-fn forbidden_arg_diagnostic(arg: &String) -> PolicyDiagnostic {
-    diagnostic(
-        "error",
-        "forbidden_flag",
-        format!("forbidden launch arg: {arg}"),
-    )
+fn invalid(code: &'static str, message: &str) -> ProviderFailure {
+    ProviderFailure::invalid_settings("", code, message, json!({}))
 }

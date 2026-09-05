@@ -1,301 +1,207 @@
-//! Declared roles: orchestration, mapper, parser, validator, accessor, predicate, formatter
-//! adapter_declarations:
-//!   - component: src/quota.rs
-//!     role: adapter
-//!     Translates:
-//!       - opencode auth source profile to QuotaSourceResult
-//!       - provider-owned QuotaObservation to QuotaProbeWindow
-//!       - quota refresh requirement projection at the observation boundary
+//! Account-pinned quota projection through the installed ChatGPT usage adapter.
 
-use crate::account::AccountProfile;
-use crate::activity::ActivityTargets;
-use crate::encoding::now_unix_ms;
-use crate::envelope::{HostContext, ProviderFailure, RequestEnvelope};
-use crate::native_runtime::{self, NativeRuntimeContext};
-use crate::quota_adapter::{self, QuotaObservation, QuotaObservationFailure, QuotaWindow};
-use crate::quota_observer::{self, QuotaObserverContext};
-use crate::runtime_selection::{append_resolved_activity_targets, resolve_runtime_selection};
+use crate::{
+    account,
+    envelope::{ProviderFailure, RequestEnvelope},
+};
 use chrono::DateTime;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::Read,
+    path::Path,
+    process::{Child, Command, Stdio},
+    time::{Duration, Instant},
+};
+
+const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Deserialize)]
-struct QuotaBaseParams {
+#[serde(deny_unknown_fields)]
+struct Params {
     settings_id: String,
+    #[serde(default)]
+    model_name: Option<String>,
+    #[serde(default)]
+    context: Option<Value>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum Command {
-    Source,
-    Probe,
-    RefreshAuth,
+#[derive(Deserialize)]
+struct Usage {
+    windows: Vec<UsageWindow>,
 }
 
-pub(crate) fn handle(command: Command, request: RequestEnvelope) -> Result<Value, ProviderFailure> {
-    let RequestEnvelope {
-        host,
-        params,
-        request_id,
-        provider_instance_id,
-        ..
-    } = request;
-    match command {
-        Command::Source => source_params(&host, params, &request_id),
-        Command::Probe => probe_params(&host, params, &request_id),
-        Command::RefreshAuth => crate::quota_auth_refresh::refresh_auth_params(
-            &host,
-            params,
-            &request_id,
-            provider_instance_id.as_deref(),
-        ),
+#[derive(Deserialize)]
+struct UsageWindow {
+    used_percent: f64,
+    resets_at: String,
+}
+
+pub fn handle(operation: &str, request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
+    if operation == "quota.refresh_auth" {
+        return Err(ProviderFailure::unsupported(&request.request_id, "auth_refresh_unsupported", "Codex refreshes its authentication during native execution; standalone refresh is unavailable"));
     }
-}
-
-pub(crate) fn activity_targets(
-    host: &HostContext,
-    params: &Value,
-    result: Option<&Value>,
-    request_id: &str,
-) -> ActivityTargets {
-    let mut targets = ActivityTargets::default();
-    let settings_id = params
-        .get("settings_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    if let Some(settings_id) = settings_id {
-        targets.attempted("settings_record", settings_id, "params.settings_id");
-        if result.is_some() {
-            append_resolved_activity_targets(
-                &mut targets,
-                host,
-                settings_id,
-                request_id,
-                "runtime_selection.settings_record",
-            );
+    let params: Params = serde_json::from_value(request.params.clone()).map_err(|_| {
+        ProviderFailure::invalid_request(
+            &request.request_id,
+            "invalid_quota_params",
+            "Expected quota settings_id and optional model_name/context",
+        )
+    })?;
+    let _ = (&params.model_name, &params.context);
+    let home = account::home(&request.host, &params.settings_id)?;
+    let auth = home.join("auth.json");
+    let helper = account::user_home(&request.host)?.join(".local/bin/chatgpt-usage");
+    match operation {
+        "quota.source" => Ok(json!({
+            "has_source": helper.is_file() && auth.is_file(),
+            "source_id": format!("{}.native_auth", params.settings_id),
+            "freshness": "live_probe",
+        })),
+        "quota.probe" => {
+            if !helper.is_file() || !auth.is_file() {
+                return Ok(unavailable("Native auth or quota adapter is unavailable"));
+            }
+            let windows = probe(request, &helper, &auth, &home).and_then(|bytes| project(&bytes));
+            match windows {
+                Ok(windows) => {
+                    Ok(json!({"available":true, "checked_at_unix_ms":now_ms(), "windows":windows}))
+                }
+                Err(message) => Ok(unavailable(message)),
+            }
         }
-    }
-    targets
-}
-
-pub fn source_params(
-    host: &HostContext,
-    params: Value,
-    request_id: &str,
-) -> Result<Value, ProviderFailure> {
-    let params = parse_base_params(params, request_id)?;
-    let account = account_from_settings_record(host, &params.settings_id, request_id)?;
-    let auth_path = observed_auth_path(host, account, request_id)?;
-    Ok(source_result(account, &auth_path))
-}
-
-pub fn probe_params(
-    host: &HostContext,
-    params: Value,
-    request_id: &str,
-) -> Result<Value, ProviderFailure> {
-    let params = parse_base_params(params, request_id)?;
-    let account = account_from_settings_record(host, &params.settings_id, request_id)?;
-    let auth_path = observed_auth_path(host, account, request_id)?;
-    let observer = quota_observer::resolve(host, account, request_id)?;
-    Ok(probe_auth_path(&auth_path, &observer))
-}
-
-fn source_result(account: &AccountProfile, auth_path: &Path) -> Value {
-    let has_source = auth_has_source(auth_path);
-    let source_id = readable_source_id(has_source, account, auth_path);
-    source_result_json(has_source, source_id)
-}
-
-fn source_result_json(has_source: bool, source_id: Option<String>) -> Value {
-    let mut result = serde_json::Map::new();
-    result.insert("has_source".to_string(), json!(has_source));
-    result.insert("freshness".to_string(), json!(source_freshness(has_source)));
-    if let Some(source_id) = source_id {
-        result.insert("source_id".to_string(), json!(source_id));
-    }
-    Value::Object(result)
-}
-
-fn readable_source_id(
-    has_source: bool,
-    account: &AccountProfile,
-    auth_path: &Path,
-) -> Option<String> {
-    has_source.then(|| source_id(account, auth_path))
-}
-
-fn probe_auth_path(auth_path: &Path, observer: &QuotaObserverContext) -> Value {
-    if !auth_has_source(auth_path) {
-        return unreadable_auth_probe_result();
-    }
-    probe_observation_result(run_probe(auth_path, observer))
-}
-
-fn unreadable_auth_probe_result() -> Value {
-    unavailable_result("native opencode auth source is missing or unreadable".to_string())
-}
-
-pub(crate) fn run_probe(
-    auth_path: &Path,
-    observer: &QuotaObserverContext,
-) -> Result<QuotaObservation, QuotaObservationFailure> {
-    quota_adapter::observe_quota(auth_path, observer)
-}
-
-fn probe_observation_result(
-    observation: Result<QuotaObservation, QuotaObservationFailure>,
-) -> Value {
-    match observation {
-        Ok(observation) => available_probe_result(&observation.windows),
-        Err(failure) => unavailable_result(quota_observation_failure_detail(failure)),
+        _ => Err(ProviderFailure::unsupported(
+            &request.request_id,
+            "unsupported_quota_operation",
+            "Unknown quota operation",
+        )),
     }
 }
 
-fn quota_observation_failure_detail(failure: QuotaObservationFailure) -> String {
-    if failure.needs_auth_refresh() {
-        return format!(
-            "{} (authentication refresh required; invoke quota.refresh_auth with a new request_id before probing again)",
-            failure.detail
-        );
+fn unavailable(detail: &str) -> Value {
+    json!({"available":false, "checked_at_unix_ms":now_ms(), "windows":[], "detail":detail})
+}
+
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+fn probe(
+    request: &RequestEnvelope,
+    helper: &Path,
+    auth: &Path,
+    home: &Path,
+) -> Result<Vec<u8>, &'static str> {
+    let remaining = request
+        .host
+        .deadline_unix_ms
+        .map(|deadline| Duration::from_millis(deadline.saturating_sub(now_ms())))
+        .unwrap_or(PROBE_TIMEOUT)
+        .min(PROBE_TIMEOUT);
+    if remaining.is_zero() {
+        return Err("Quota probe deadline expired");
     }
-    failure.detail
-}
-
-fn unavailable_result(detail: String) -> Value {
-    json!({
-        "available": false,
-        "checked_at_unix_ms": now_unix_ms(),
-        "windows": [],
-        "detail": detail,
-    })
-}
-
-fn quota_windows(windows: &[QuotaWindow]) -> Vec<Value> {
-    windows.iter().map(quota_window).collect()
-}
-
-fn quota_window(window: &QuotaWindow) -> Value {
-    let mut result = serde_json::Map::new();
-    if let Some(name) = &window.name {
-        result.insert("name".to_string(), json!(name));
+    let started = Instant::now();
+    let mut output = tempfile::tempfile().map_err(|_| "Quota output capture unavailable")?;
+    let mut command = Command::new(helper);
+    command
+        .arg(auth)
+        .stdin(Stdio::null())
+        .stdout(
+            output
+                .try_clone()
+                .map_err(|_| "Quota output capture unavailable")?,
+        )
+        .stderr(Stdio::null());
+    if let Some(env) = &request.host.env {
+        command.envs(env);
     }
-    result.insert(
-        "remaining_ratio".to_string(),
-        json!(((100.0 - window.used_percent) / 100.0).clamp(0.0, 1.0)),
-    );
-    result.insert(
-        "resets_at_unix_ms".to_string(),
-        json!(epoch_ms(&window.resets_at)),
-    );
-    Value::Object(result)
-}
-
-fn parse_base_params(params: Value, request_id: &str) -> Result<QuotaBaseParams, ProviderFailure> {
-    serde_json::from_value(params).map_err(|err| invalid_quota_params_failure(request_id, err))
-}
-
-fn account_from_settings_record(
-    host: &HostContext,
-    settings_id: &str,
-    request_id: &str,
-) -> Result<&'static AccountProfile, ProviderFailure> {
-    resolve_runtime_selection(host, settings_id, request_id).map(|selection| selection.account)
-}
-
-pub(crate) fn resolved_auth_path(
-    account: &AccountProfile,
-    runtime: &NativeRuntimeContext,
-) -> PathBuf {
-    runtime.expand_path(account.quota_auth_path())
-}
-
-fn ambient_auth_path(account: &AccountProfile) -> PathBuf {
-    match (
-        account.quota_auth_path().strip_prefix("~/"),
-        std::env::var_os("HOME"),
-    ) {
-        (Some(relative), Some(home)) => PathBuf::from(home).join(relative),
-        _ => PathBuf::from(account.quota_auth_path()),
+    command.env("CODEX_HOME", home);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
-}
-
-fn observed_auth_path(
-    host: &HostContext,
-    account: &AccountProfile,
-    request_id: &str,
-) -> Result<PathBuf, ProviderFailure> {
-    native_runtime::resolve_existing_for_account(host, account, request_id).map(|runtime| {
-        runtime
-            .as_ref()
-            .map(|runtime| resolved_auth_path(account, runtime))
-            .unwrap_or_else(|| ambient_auth_path(account))
-    })
-}
-
-fn auth_is_readable(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
+    let mut process = ProbeChild {
+        child: command
+            .spawn()
+            .map_err(|_| "Quota adapter could not start")?,
+        completed: false,
     };
-    if !metadata.is_file() || !has_read_permission(&metadata) {
-        return false;
+    loop {
+        if output
+            .metadata()
+            .map_err(|_| "Quota output capture unavailable")?
+            .len()
+            > MAX_OUTPUT_BYTES
+        {
+            return Err("Quota adapter exceeded output limit");
+        }
+        if let Some(status) = process
+            .child
+            .try_wait()
+            .map_err(|_| "Quota adapter status unavailable")?
+        {
+            process.completed = true;
+            if !status.success() {
+                return Err("Quota adapter failed; authenticate the selected Codex account");
+            }
+            break;
+        }
+        if started.elapsed() >= remaining {
+            return Err("Quota probe deadline expired");
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    fs::File::open(path).is_ok()
+    use std::io::{Seek, SeekFrom};
+    output
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| "Quota output capture unavailable")?;
+    read_output(output)
 }
 
-fn auth_has_source(path: &Path) -> bool {
-    auth_is_readable(path)
+struct ProbeChild {
+    child: Child,
+    completed: bool,
 }
-
-#[cfg(unix)]
-fn has_read_permission(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    metadata.permissions().mode() & 0o444 != 0
-}
-
-#[cfg(not(unix))]
-fn has_read_permission(_metadata: &fs::Metadata) -> bool {
-    true
-}
-
-fn source_id(account: &AccountProfile, auth_path: &Path) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        account.quota_source_kind(),
-        account.opencode_wrapper,
-        account.opencode_index,
-        auth_path.to_string_lossy()
-    )
-}
-
-fn source_freshness(has_source: bool) -> &'static str {
-    if has_source {
-        "auth_readable"
-    } else {
-        "auth_missing_or_unreadable"
+impl Drop for ProbeChild {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
-fn available_probe_result(windows: &[QuotaWindow]) -> Value {
-    json!({
-        "available": true,
-        "checked_at_unix_ms": now_unix_ms(),
-        "windows": quota_windows(windows),
-    })
+fn read_output(output: File) -> Result<Vec<u8>, &'static str> {
+    let mut bytes = Vec::new();
+    output
+        .take(MAX_OUTPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Quota output capture unavailable")?;
+    if bytes.len() as u64 > MAX_OUTPUT_BYTES {
+        return Err("Quota adapter exceeded output limit");
+    }
+    Ok(bytes)
 }
 
-fn invalid_quota_params_failure(request_id: &str, err: serde_json::Error) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "invalid_quota_params",
-        format!("quota params are invalid: {err}"),
-    )
-}
-
-fn epoch_ms(rfc3339: &str) -> i64 {
-    DateTime::parse_from_rfc3339(rfc3339)
-        .expect("quota observation resets_at was validated before projection")
-        .timestamp_millis()
+fn project(bytes: &[u8]) -> Result<Vec<Value>, &'static str> {
+    let usage: Usage =
+        serde_json::from_slice(bytes).map_err(|_| "Quota adapter returned invalid usage data")?;
+    if usage.windows.is_empty() || usage.windows.len() > 16 {
+        return Err("Quota adapter returned no usable quota windows");
+    }
+    usage.windows.into_iter().map(|window| {
+        if !window.used_percent.is_finite() || !(0.0..=100.0).contains(&window.used_percent) { return Err("Quota adapter returned an invalid usage percentage"); }
+        let reset = DateTime::parse_from_rfc3339(&window.resets_at).map_err(|_| "Quota adapter returned an invalid reset timestamp")?.timestamp_millis();
+        if reset < 0 { return Err("Quota adapter returned an invalid reset timestamp"); }
+        Ok(json!({"remaining_ratio":(100.0-window.used_percent)/100.0,"resets_at_unix_ms":reset as u64}))
+    }).collect()
 }

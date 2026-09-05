@@ -1,39 +1,24 @@
-//! Declared roles: orchestration, mapper, parser, validator, formatter, filter, accessor, predicate
-//! intrinsic_surface_declarations:
-//!   - component: src/session.rs
-//!     role: intrinsic-surface
-//!     Domain: canonical transcript surface
-//!     Owns:
-//!       - opencode export to provider session responses
-//!       - canonical transcript byte serialization
-//!       - session replace unsupported boundary
+//! Codex rollout discovery and read-only projection into the provider session contract.
 //!
-//! adapter_declarations:
-//!   - component: src/session.rs
-//!     role: adapter
-//!     Translates:
-//!       - opencode export native session JSON to SessionReadTurnsResult
-//!       - opencode launch sessionID evidence to SessionCaptureResult
-//!       - opencode export native session JSON to oulipoly.canonical_transcript/v1
-//!       - opencode absent transcript path to SessionLocateTranscriptResult
-//!       - opencode unsupported transcript import to SessionReplaceResult boundary
+//! The first session_meta owns the file. Forked rollouts can include their parent's
+//! metadata later, so a later session_meta must never change transcript identity.
 
-use crate::activity::ActivityTargets;
-use crate::encoding::{encode_base64, sha256_hex};
 use crate::envelope::{ProviderFailure, RequestEnvelope};
-use crate::native_runtime::{self, NativeRuntimeContext};
-use crate::opencode::{self, OpencodeExport, OpencodeExportError, OpencodeMessage};
-use crate::runtime_selection::{append_resolved_activity_targets, resolve_runtime_selection};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
-const CANONICAL_FORMAT: &str = "oulipoly.canonical_transcript/v1";
-const NATIVE_FORMAT_ID: &str = "opencode.export/native-json";
-const SOURCE_KIND: &str = "opencode.export";
-const USER_OBSERVATION_PROJECTION: &str = "user_observation";
-const MAX_OBSERVATION_BODY_TAIL: usize = 16;
+const FORMAT_ID: &str = "codex.rollout/jsonl";
+const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ROLLOUT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ROLLOUTS: usize = 100_000;
+const MAX_PAGE_SIZE: usize = 1000;
 
 #[derive(Deserialize)]
 struct SessionParams {
@@ -41,985 +26,738 @@ struct SessionParams {
     session_id: Option<String>,
     turn_projection: Option<String>,
     body_tail_limit: Option<usize>,
+    after_timestamp: Option<String>,
+    after_unix_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
-struct SessionCaptureParams {
+#[serde(deny_unknown_fields)]
+struct EnumerateParams {
     settings_id: String,
-    session_id: Option<String>,
-    launch: Option<SessionCaptureLaunch>,
-    live_report: Option<SessionCaptureLiveReport>,
-    pinned_target: Option<String>,
-    start_bound_provider_session_id: Option<String>,
-    #[serde(flatten)]
-    extra: serde_json::Map<String, Value>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    #[serde(default)]
+    include_cwd: bool,
+    #[serde(default)]
+    include_turn_count: bool,
+    since_unix_ms: Option<u64>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionCaptureLiveReport {
-    provider_session_id: String,
-    invocation_uuid: String,
+struct RolloutMeta {
+    id: String,
+    cwd: Option<String>,
+    created_unix_ms: Option<u64>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionCaptureLaunch {
-    session: Option<SessionCaptureLaunchSession>,
+struct Rollout {
+    meta: RolloutMeta,
+    turns: Vec<Value>,
+    complete: bool,
+    task_completed: Option<bool>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionCaptureLaunchSession {
-    provider_session_id: Option<String>,
-    #[serde(rename = "source")]
-    _source: Option<String>,
-}
-
-struct CapturedSession {
-    provider_session_id: Option<String>,
-    source: &'static str,
-}
-
-struct SessionIdentityCandidate {
-    provider_session_id: String,
-    source: &'static str,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum Command {
-    LocateTranscript,
-    ReadTurns,
-    Capture,
-    Enumerate,
-    Export,
-    Replace,
-}
-
-pub(crate) struct SessionOutcome {
-    pub result: Value,
-}
-
-impl SessionOutcome {
-    fn new(result: Value) -> Self {
-        Self { result }
+pub fn handle(operation: &str, request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
+    if operation == "session.read_turns" && request.params.get("read_protocol").is_some() {
+        return crate::session_turn_pages::read_turns(request);
+    }
+    match operation {
+        "session.capture" => capture(request),
+        "session.enumerate" => enumerate(request),
+        "session.locate_transcript" | "session.read_turns" => {
+            let params: SessionParams = parse(&request.params, request)?;
+            let root = account_home(request, &params.settings_id)?;
+            let session_id = params
+                .session_id
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| invalid(request, "session_id must be non-empty"))?;
+            validate_session_id(session_id, request)?;
+            let located = locate(&root, session_id, request)?;
+            if operation == "session.locate_transcript" {
+                return Ok(match located {
+                    Some(path) => json!({"located":true, "path":path,
+                        "format_id":FORMAT_ID, "source_id":source_id(session_id),
+                        "require_existing_observed":true}),
+                    None => json!({"located":false}),
+                });
+            }
+            let path = located.ok_or_else(|| not_found(request))?;
+            read_turns(&path, session_id, &params, request)
+        }
+        "session.export" => Err(ProviderFailure::unsupported(
+            &request.request_id,
+            "session_export_unsupported",
+            "Codex rollout projection cannot preserve a faithful canonical transcript for import",
+        )),
+        "session.replace" => Err(ProviderFailure::unsupported(
+            &request.request_id,
+            "session_replace_unsupported",
+            "Codex does not expose a stable transcript replacement API",
+        )),
+        _ => Err(ProviderFailure::unsupported(
+            &request.request_id,
+            "session_operation_unsupported",
+            "Unsupported Codex session operation",
+        )),
     }
 }
 
-pub(crate) fn handle(
-    command: Command,
-    request: RequestEnvelope,
-) -> Result<SessionOutcome, ProviderFailure> {
-    let RequestEnvelope {
-        host,
-        params,
-        request_id,
-        ..
-    } = request;
-    match command {
-        Command::LocateTranscript => {
-            locate_transcript_params(params, &request_id).map(SessionOutcome::new)
-        }
-        Command::ReadTurns => {
-            read_turns_params(&host, params, &request_id).map(SessionOutcome::new)
-        }
-        Command::Capture => capture_params(&host, params, &request_id).map(SessionOutcome::new),
-        Command::Enumerate => {
-            crate::session_enumeration::enumerate_params(&host, params, &request_id)
-                .map(SessionOutcome::new)
-        }
-        Command::Export => export_params(&host, params, &request_id).map(SessionOutcome::new),
-        Command::Replace => replace_params(params, &request_id).map(SessionOutcome::new),
-    }
+pub(crate) fn account_home(
+    request: &RequestEnvelope,
+    settings_id: &str,
+) -> Result<PathBuf, ProviderFailure> {
+    crate::account::home(&request.host, settings_id).map_err(|mut failure| {
+        failure.request_id = request.request_id.clone();
+        failure
+    })
 }
 
-pub(crate) fn activity_targets(
-    command: Command,
-    host: &crate::envelope::HostContext,
-    params: &Value,
-    result: Option<&Value>,
-    request_id: &str,
-) -> ActivityTargets {
-    let mut targets = ActivityTargets::default();
-    let settings_id = params
-        .get("settings_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    if let Some(settings_id) = settings_id {
-        targets.attempted("settings_record", settings_id, "params.settings_id");
-    }
-    if command == Command::Capture {
-        append_capture_activity_candidates(&mut targets, params, request_id);
-    } else if let Some(session_id) = params
-        .get("session_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
+fn parse<T: serde::de::DeserializeOwned>(
+    value: &Value,
+    request: &RequestEnvelope,
+) -> Result<T, ProviderFailure> {
+    serde_json::from_value(value.clone())
+        .map_err(|_| invalid(request, "Invalid session parameters"))
+}
+
+fn invalid(request: &RequestEnvelope, message: &str) -> ProviderFailure {
+    ProviderFailure::invalid_request(&request.request_id, "invalid_session_params", message)
+}
+
+fn io_failure(request: &RequestEnvelope) -> ProviderFailure {
+    ProviderFailure::internal(
+        &request.request_id,
+        "codex_rollout_io",
+        "Could not read the selected Codex account's rollout files",
+    )
+}
+
+fn corrupt(request: &RequestEnvelope) -> ProviderFailure {
+    ProviderFailure::internal(
+        &request.request_id,
+        "codex_rollout_invalid",
+        "Codex rollout contains invalid metadata or a malformed complete record",
+    )
+}
+
+fn not_found(request: &RequestEnvelope) -> ProviderFailure {
+    ProviderFailure::invalid_request(
+        &request.request_id,
+        "codex_session_not_found",
+        "Session was not found in the selected Codex account",
+    )
+}
+
+fn source_id(id: &str) -> String {
+    format!("codex.rollout:{id}")
+}
+
+fn validate_session_id(id: &str, request: &RequestEnvelope) -> Result<(), ProviderFailure> {
+    if id.is_empty()
+        || id.len() > 256
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
-        targets.attempted("provider_session", session_id, "params.session_id");
+        return Err(invalid(request, "Invalid Codex session ID"));
     }
-    let Some(result) = result else {
-        return targets;
-    };
-    if let Some(settings_id) = settings_id.filter(|_| session_resolves_runtime(command, params)) {
-        append_resolved_activity_targets(
-            &mut targets,
-            host,
-            settings_id,
-            request_id,
-            "runtime_selection.settings_record",
-        );
-    }
-    append_completed_session_activity_targets(&mut targets, command, params, result);
-    targets
+    Ok(())
 }
 
-fn append_capture_activity_candidates(
-    targets: &mut ActivityTargets,
-    params: &Value,
-    request_id: &str,
-) {
-    let Ok(params) = parse_capture_params(params.clone(), request_id) else {
-        return;
-    };
-    let Ok(candidates) = session_identity_candidates(&params, request_id) else {
-        return;
-    };
-    for candidate in candidates {
-        targets.attempted(
-            "provider_session",
-            candidate.provider_session_id,
-            format!("params.{}", candidate.source),
-        );
-    }
-}
-
-fn session_resolves_runtime(command: Command, params: &Value) -> bool {
-    matches!(
-        command,
-        Command::ReadTurns | Command::Enumerate | Command::Export
-    ) || (command == Command::Capture && params.get("live_report").is_some())
-}
-
-fn append_completed_session_activity_targets(
-    targets: &mut ActivityTargets,
-    command: Command,
-    params: &Value,
-    result: &Value,
-) {
-    if command == Command::Capture {
-        if let Some(provider_session_id) = result
-            .get("provider_session_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-        {
-            let source = result
-                .pointer("/state/source")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("provider_session_id");
-            targets.resolved(
-                "provider_session",
-                provider_session_id,
-                format!("result.{source}"),
-            );
+fn rollout_paths(root: &Path, request: &RequestEnvelope) -> Result<Vec<PathBuf>, ProviderFailure> {
+    let mut paths = Vec::new();
+    let mut pending = vec![root.join("sessions"), root.join("archived_sessions")];
+    let mut visited = 0;
+    while let Some(dir) = pending.pop() {
+        let metadata = match fs::symlink_metadata(&dir) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(io_failure(request)),
+        };
+        // Account isolation includes refusing symlinks into another account's storage.
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
         }
-        return;
-    }
-    if command == Command::Enumerate {
-        if let Some(sessions) = result.get("sessions").and_then(Value::as_array) {
-            for session in sessions {
-                if let Some(provider_session_id) = session
-                    .get("provider_session_id")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    targets.resolved(
-                        "provider_session",
-                        provider_session_id,
-                        "result.sessions[].provider_session_id",
-                    );
+        for entry in fs::read_dir(dir).map_err(|_| io_failure(request))? {
+            let entry = entry.map_err(|_| io_failure(request))?;
+            let kind = entry.file_type().map_err(|_| io_failure(request))?;
+            visited += 1;
+            if visited > MAX_ROLLOUTS * 4 {
+                return Err(ProviderFailure::internal(
+                    &request.request_id,
+                    "codex_rollout_capacity",
+                    "Codex rollout directory exceeds the scan capacity",
+                ));
+            }
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+                    paths.push(entry.path());
+                    if paths.len() > MAX_ROLLOUTS {
+                        return Err(ProviderFailure::internal(
+                            &request.request_id,
+                            "codex_rollout_capacity",
+                            "Codex account exceeds the rollout capacity",
+                        ));
+                    }
                 }
             }
         }
-        return;
     }
-    if matches!(command, Command::ReadTurns | Command::Export) {
-        if let Some(session_id) = params
-            .get("session_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-        {
-            targets.resolved("provider_session", session_id, "params.session_id");
+    paths.sort();
+    Ok(paths)
+}
+
+fn read_line(
+    reader: &mut impl BufRead,
+    request: &RequestEnvelope,
+) -> Result<Vec<u8>, ProviderFailure> {
+    let mut line = Vec::new();
+    reader
+        .take(MAX_LINE_BYTES + 1)
+        .read_until(b'\n', &mut line)
+        .map_err(|_| io_failure(request))?;
+    if line.len() as u64 > MAX_LINE_BYTES {
+        return Err(ProviderFailure::internal(
+            &request.request_id,
+            "codex_rollout_capacity",
+            "Codex rollout record exceeds the size limit",
+        ));
+    }
+    Ok(line)
+}
+
+fn parse_meta(value: &Value, request: &RequestEnvelope) -> Result<RolloutMeta, ProviderFailure> {
+    if value["type"] != "session_meta" {
+        return Err(corrupt(request));
+    }
+    let payload = &value["payload"];
+    let id = payload["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| corrupt(request))?;
+    validate_session_id(id, request).map_err(|_| corrupt(request))?;
+    Ok(RolloutMeta {
+        id: id.to_owned(),
+        cwd: payload["cwd"].as_str().map(str::to_owned),
+        created_unix_ms: timestamp_ms(
+            payload["timestamp"]
+                .as_str()
+                .or(value["timestamp"].as_str()),
+        ),
+    })
+}
+
+fn metadata(path: &Path, request: &RequestEnvelope) -> Result<RolloutMeta, ProviderFailure> {
+    let mut reader = BufReader::new(File::open(path).map_err(|_| io_failure(request))?);
+    loop {
+        let line = read_line(&mut reader, request)?;
+        if line.is_empty() {
+            return Err(corrupt(request));
         }
-    }
-}
-
-pub fn locate_transcript_params(params: Value, request_id: &str) -> Result<Value, ProviderFailure> {
-    let params = parse_session_params(params, request_id)?;
-    Ok(locate_transcript_result(params.session_id.as_deref()))
-}
-
-pub fn read_turns_params(
-    host: &crate::envelope::HostContext,
-    params: Value,
-    request_id: &str,
-) -> Result<Value, ProviderFailure> {
-    let params = parse_session_params(params, request_id)?;
-    validate_turn_projection(&params, request_id)?;
-    let session_id = required_session_id(&params, request_id)?;
-    let native = export_native(host, &params.settings_id, &session_id, request_id)?;
-    let turns = match params.turn_projection.as_deref() {
-        Some(USER_OBSERVATION_PROJECTION) => {
-            user_observation_turns(&native, &session_id, params.body_tail_limit.unwrap_or(4))?
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
         }
-        _ => native_turns(&native, &session_id)?,
-    };
-    Ok(read_turns_result(turns))
-}
-
-pub fn capture_params(
-    host: &crate::envelope::HostContext,
-    params: Value,
-    request_id: &str,
-) -> Result<Value, ProviderFailure> {
-    let params = parse_capture_params(params, request_id)?;
-    let captured = captured_session_id(&params, request_id)?;
-    if let Some(captured) = capture_live_report(host, &params, request_id)? {
-        return Ok(capture_result(
-            Some(captured),
-            "live_report.provider_session_id",
-        ));
-    }
-    let provider_session_id = captured.provider_session_id;
-    let source = captured.source;
-    Ok(capture_result(provider_session_id, source))
-}
-
-fn capture_live_report(
-    host: &crate::envelope::HostContext,
-    params: &SessionCaptureParams,
-    request_id: &str,
-) -> Result<Option<String>, ProviderFailure> {
-    let Some(report) = params.live_report.as_ref() else {
-        return Ok(None);
-    };
-    let provider_session_id =
-        non_empty_string(Some(&report.provider_session_id)).ok_or_else(|| {
-            invalid_session_capture_params_failure(
-                request_id,
-                "live_report.provider_session_id must be non-empty",
-            )
-        })?;
-    let invocation_uuid = non_empty_string(Some(&report.invocation_uuid)).ok_or_else(|| {
-        invalid_session_capture_params_failure(
-            request_id,
-            "live_report.invocation_uuid must be non-empty",
-        )
-    })?;
-    let envelope_invocation_uuid = params
-        .extra
-        .get("invocation_uuid")
-        .and_then(Value::as_str)
-        .and_then(|value| non_empty_string(Some(value)));
-    if envelope_invocation_uuid.as_deref() != Some(invocation_uuid.as_str()) {
-        return Err(invalid_session_capture_params_failure(
-            request_id,
-            "live_report.invocation_uuid must match invocation_uuid",
-        ));
-    }
-    let native = export_native(host, &params.settings_id, &provider_session_id, request_id)?;
-    validate_live_report_working_directory(&native, host.working_directory.as_deref(), request_id)?;
-    Ok(Some(native.info.id))
-}
-
-fn validate_live_report_working_directory(
-    native: &OpencodeExport,
-    working_directory: Option<&str>,
-    request_id: &str,
-) -> Result<(), ProviderFailure> {
-    let expected = non_empty_string(working_directory).ok_or_else(|| {
-        invalid_session_capture_params_failure(
-            request_id,
-            "live reports require host.working_directory",
-        )
-    })?;
-    let actual = non_empty_string(native.info.directory.as_deref()).ok_or_else(|| {
-        invalid_session_capture_params_failure(
-            request_id,
-            "opencode export is missing info.directory for the live report",
-        )
-    })?;
-    if Path::new(&actual) != Path::new(&expected) {
-        return Err(invalid_session_capture_params_failure(
-            request_id,
-            format!(
-                "live report workspace mismatch: opencode exported {actual}, runner requested {expected}"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-pub fn export_params(
-    host: &crate::envelope::HostContext,
-    params: Value,
-    request_id: &str,
-) -> Result<Value, ProviderFailure> {
-    let params = parse_session_params(params, request_id)?;
-    let session_id = required_session_id(&params, request_id)?;
-    let native = export_native(host, &params.settings_id, &session_id, request_id)?;
-    let records = canonical_records(&native, &session_id)?;
-    let bytes = canonical_jsonl(&records);
-    Ok(export_result(&bytes, records.len()))
-}
-
-pub fn replace_params(_params: Value, request_id: &str) -> Result<Value, ProviderFailure> {
-    Err(session_replace_unsupported_failure(request_id))
-}
-
-fn parse_session_params(params: Value, request_id: &str) -> Result<SessionParams, ProviderFailure> {
-    serde_json::from_value(params).map_err(|err| invalid_session_params_failure(request_id, err))
-}
-
-fn parse_capture_params(
-    params: Value,
-    request_id: &str,
-) -> Result<SessionCaptureParams, ProviderFailure> {
-    let params: SessionCaptureParams = serde_json::from_value(params)
-        .map_err(|err| invalid_session_capture_params_failure(request_id, err))?;
-    if params.extra.contains_key("evidence") {
-        return Err(invalid_session_capture_params_failure(
-            request_id,
-            "the removed evidence field is unsupported",
-        ));
-    }
-    Ok(params)
-}
-
-fn required_session_id(
-    params: &SessionParams,
-    request_id: &str,
-) -> Result<String, ProviderFailure> {
-    params
-        .session_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| missing_session_id_failure(request_id))
-}
-
-fn validate_turn_projection(
-    params: &SessionParams,
-    request_id: &str,
-) -> Result<(), ProviderFailure> {
-    match params.turn_projection.as_deref() {
-        None => Ok(()),
-        Some(USER_OBSERVATION_PROJECTION)
-            if matches!(
-                params.body_tail_limit,
-                None | Some(1..=MAX_OBSERVATION_BODY_TAIL)
-            ) =>
-        {
-            Ok(())
-        }
-        Some(USER_OBSERVATION_PROJECTION) => Err(invalid_session_params_message_failure(
-            request_id,
-            format!("body_tail_limit must be between 1 and {MAX_OBSERVATION_BODY_TAIL}"),
-        )),
-        Some(projection) => Err(invalid_session_params_message_failure(
-            request_id,
-            format!("unsupported turn_projection: {projection}"),
-        )),
+        return parse_meta(
+            &serde_json::from_slice::<Value>(&line).map_err(|_| corrupt(request))?,
+            request,
+        );
     }
 }
 
-fn export_native(
-    host: &crate::envelope::HostContext,
-    settings_id: &str,
-    session_id: &str,
-    request_id: &str,
-) -> Result<OpencodeExport, ProviderFailure> {
-    let runtime = session_runtime(host, settings_id, request_id)?;
-    let native = opencode::export(session_id, &runtime)
-        .map_err(|err| export_failure(request_id, session_id, err))?;
-    validate_export_session_id(&native, session_id, request_id)?;
-    validate_export_message_sessions(&native, session_id, request_id)?;
-    Ok(native)
-}
-
-fn validate_export_session_id(
-    native: &OpencodeExport,
-    expected: &str,
-    request_id: &str,
-) -> Result<(), ProviderFailure> {
-    if native.info.id == expected {
-        return Ok(());
-    }
-    Err(session_export_id_mismatch_failure(
-        request_id,
-        &native.info.id,
-        expected,
-    ))
-}
-
-fn validate_export_message_sessions(
-    native: &OpencodeExport,
-    expected: &str,
-    request_id: &str,
-) -> Result<(), ProviderFailure> {
-    for message in &native.messages {
-        match message.info.session_id.as_deref() {
-            Some(session_id) if session_id == expected => {}
-            Some(session_id) => {
-                return Err(session_record_id_mismatch_failure(
-                    request_id,
-                    &message.info.id,
-                    session_id,
-                    expected,
+pub(crate) fn locate(
+    root: &Path,
+    id: &str,
+    request: &RequestEnvelope,
+) -> Result<Option<PathBuf>, ProviderFailure> {
+    let mut found = None;
+    for path in rollout_paths(root, request)? {
+        // Filename conventions alone are not authoritative, including for forks.
+        let meta = match metadata(&path, request) {
+            Ok(meta) => meta,
+            Err(error)
+                if path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().ends_with(&format!("-{id}.jsonl"))) =>
+            {
+                return Err(error)
+            }
+            Err(_) => continue,
+        };
+        if meta.id == id {
+            if found.is_some() {
+                return Err(ProviderFailure::conflict(
+                    &request.request_id,
+                    "codex_session_ambiguous",
+                    "More than one rollout claims this Codex session",
+                    json!({}),
                 ));
             }
-            None => {
-                return Err(session_record_missing_session_id_failure(
-                    request_id,
-                    &message.info.id,
+            found = Some(path);
+        }
+    }
+    Ok(found)
+}
+
+/// Native filenames select candidates; their first metadata record still owns
+/// identity. Nonstandard/fork filenames use a bounded metadata fallback.
+pub(crate) fn locate_page_source(
+    root: &Path,
+    id: &str,
+    maximum: usize,
+    request: &RequestEnvelope,
+) -> Result<(File, usize, u64), ProviderFailure> {
+    let paths = rollout_paths(root, request)?;
+    let suffix = format!("-{id}.jsonl");
+    let named: Vec<_> = paths
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(&suffix))
+        })
+        .collect();
+    let candidates: Vec<_> = if named.is_empty() {
+        paths.iter().collect()
+    } else {
+        named
+    };
+    let mut examined = 0;
+    let mut found = None;
+    for path in candidates {
+        let remaining = maximum.saturating_sub(examined);
+        if remaining == 0 {
+            return Err(ProviderFailure::invalid_request(
+                &request.request_id,
+                "session_turn_page_budget_too_small",
+                "Source budget cannot admit rollout identity metadata",
+            ));
+        }
+        let mut reader = BufReader::new(
+            File::open(path)
+                .map_err(|_| io_failure(request))?
+                .take(remaining as u64),
+        );
+        let mut first = Vec::new();
+        reader
+            .read_until(b'\n', &mut first)
+            .map_err(|_| io_failure(request))?;
+        examined += first.len();
+        if !first.ends_with(b"\n") {
+            return Err(ProviderFailure::invalid_request(
+                &request.request_id,
+                "session_turn_page_budget_too_small",
+                "Source budget cannot admit the complete rollout identity record",
+            ));
+        }
+        let meta = serde_json::from_slice::<Value>(&first)
+            .map_err(|_| corrupt(request))
+            .and_then(|v| parse_meta(&v, request))?;
+        if meta.id == id {
+            if found.is_some() {
+                return Err(ProviderFailure::conflict(
+                    &request.request_id,
+                    "codex_session_ambiguous",
+                    "More than one native rollout claims this session",
+                    json!({}),
                 ));
             }
+            found = Some((reader.into_inner().into_inner(), first.len() as u64));
         }
     }
-    Ok(())
+    found
+        .map(|(file, offset)| (file, examined, offset))
+        .ok_or_else(|| not_found(request))
 }
 
-fn export_failure(request_id: &str, session_id: &str, err: OpencodeExportError) -> ProviderFailure {
-    match err {
-        OpencodeExportError::Spawn(message) => {
-            opencode_export_unavailable_failure(request_id, session_id, message)
-        }
-        OpencodeExportError::Failed { status, stderr } => {
-            session_export_failed_failure(request_id, session_id, status, &stderr)
-        }
-        OpencodeExportError::InvalidJson(message) => {
-            invalid_opencode_export_failure(request_id, message)
-        }
-        OpencodeExportError::OutputTooLarge {
-            stream,
-            maximum_bytes,
-        } => ProviderFailure::invalid_request(
-            request_id,
-            "opencode_export_capacity_exceeded",
-            format!(
-                "opencode export {stream} for {session_id} exceeds the supported {maximum_bytes}-byte bound"
-            ),
-        ),
-        OpencodeExportError::TimedOut => ProviderFailure::invalid_request(
-            request_id,
-            "opencode_export_timeout",
-            format!("opencode export timed out for {session_id}"),
-        ),
-    }
-}
-
-fn native_turns(native: &OpencodeExport, session_id: &str) -> Result<Vec<Value>, ProviderFailure> {
-    native
-        .messages
-        .iter()
-        .map(|message| native_turn(message, session_id))
-        .collect()
-}
-
-fn user_observation_turns(
-    native: &OpencodeExport,
-    session_id: &str,
-    body_tail_limit: usize,
-) -> Result<Vec<Value>, ProviderFailure> {
-    let messages = native
-        .messages
-        .iter()
-        .filter(|message| message.info.role == "user")
-        .collect::<Vec<_>>();
-    let body_start = messages.len().saturating_sub(body_tail_limit);
-    messages
-        .into_iter()
-        .enumerate()
-        .map(|(index, message)| user_observation_turn(message, session_id, index >= body_start))
-        .collect()
-}
-
-fn user_observation_turn(
-    message: &OpencodeMessage,
-    session_id: &str,
-    include_body: bool,
-) -> Result<Value, ProviderFailure> {
-    let mut turn = json!({
-        "session_id": session_id,
-        "turn_id": stable_turn_id(message, session_id),
-        "role": message.info.role,
-        "timestamp": provider_turn_timestamp(message),
-    });
-    if include_body {
-        turn["body"] = Value::Array(text_parts(message));
-    }
-    Ok(turn)
-}
-
-fn native_turn(message: &OpencodeMessage, session_id: &str) -> Result<Value, ProviderFailure> {
-    let model_identity = message.info.model_identity();
-    Ok(json!({
-        "session_id": session_id,
-        "turn_id": stable_turn_id(message, session_id),
-        "role": message.info.role,
-        "timestamp": provider_turn_timestamp(message),
-        "body": text_parts(message),
-        "native": {
-            "message_id": message.info.id,
-            "session_id": message.info.session_id,
-            "created_unix_ms": message.info.time.as_ref().and_then(|time| time.created),
-            "completed_unix_ms": message.info.time.as_ref().and_then(|time| time.completed),
-            "provider_id": model_identity.provider_id(),
-            "model_id": model_identity.model_id(),
-            "variant": model_identity.variant(),
-            "parts": message.parts,
-        },
-    }))
-}
-
-fn provider_turn_timestamp(message: &OpencodeMessage) -> String {
-    message_time_millis(message)
-        .and_then(|milliseconds| i64::try_from(milliseconds).ok())
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-pub(crate) fn rotation_boundary_timestamp(native: &OpencodeExport) -> Option<String> {
-    native
-        .messages
-        .iter()
-        .map(|message| message_time_millis(message).unwrap_or_default())
-        .max()
-        .and_then(|milliseconds| i64::try_from(milliseconds).ok())
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
-}
-
-fn message_time_millis(message: &OpencodeMessage) -> Option<u64> {
-    message
-        .info
-        .time
-        .as_ref()
-        .and_then(|time| time.created.or(time.completed))
-}
-
-fn canonical_records(
-    native: &OpencodeExport,
-    session_id: &str,
-) -> Result<Vec<Value>, ProviderFailure> {
-    native
-        .messages
-        .iter()
-        .map(|message| canonical_record(message, session_id, native.info.title.as_deref()))
-        .collect()
-}
-
-fn canonical_record(
-    message: &OpencodeMessage,
-    session_id: &str,
-    title: Option<&str>,
-) -> Result<Value, ProviderFailure> {
-    let model_identity = message.info.model_identity();
-    Ok(json!({
-        "body": text_parts(message),
-        "id": stable_turn_id(message, session_id),
-        "metadata": {
-            "native_message_id": message.info.id,
-            "native_session_id": message.info.session_id,
-            "native_title": title,
-            "provider_id": model_identity.provider_id(),
-            "model_id": model_identity.model_id(),
-            "variant": model_identity.variant(),
-            "source_format": NATIVE_FORMAT_ID,
-        },
-        "role": message.info.role,
-        "timestamp": message_timestamp(message),
-        "type": "turn",
-    }))
-}
-
-fn canonical_jsonl(records: &[Value]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for record in records {
-        bytes.extend_from_slice(record.to_string().as_bytes());
-        bytes.push(b'\n');
-    }
-    bytes
-}
-
-fn stable_turn_id(message: &OpencodeMessage, session_id: &str) -> String {
-    let order = message_order_key(message);
-    let preimage = format!("opencode-turn\0{session_id}\0{}\0{order}", message.info.id);
-    format!("turn_{}", sha256_hex(preimage.as_bytes()))
-}
-
-fn message_order_key(message: &OpencodeMessage) -> String {
-    message
-        .info
-        .time
-        .as_ref()
-        .and_then(|time| time.created.or(time.completed))
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| message.info.id.clone())
-}
-
-fn message_timestamp(message: &OpencodeMessage) -> String {
-    message_order_key(message)
-}
-
-fn text_parts(message: &OpencodeMessage) -> Vec<Value> {
-    message
-        .parts
-        .iter()
-        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .map(|text| {
-            json!({
-                "type": "text",
-                "text": text,
-            })
-        })
-        .collect()
-}
-
-fn captured_session_id(
-    params: &SessionCaptureParams,
-    request_id: &str,
-) -> Result<CapturedSession, ProviderFailure> {
-    let candidates = session_identity_candidates(params, request_id)?;
-    validate_session_identity_candidates(&candidates, request_id)?;
-    Ok(candidates
-        .into_iter()
-        .next()
-        .map(|candidate| CapturedSession {
-            provider_session_id: Some(candidate.provider_session_id),
-            source: candidate.source,
-        })
-        .unwrap_or(CapturedSession {
-            provider_session_id: None,
-            source: "none",
-        }))
-}
-
-fn session_identity_candidates(
-    params: &SessionCaptureParams,
-    request_id: &str,
-) -> Result<Vec<SessionIdentityCandidate>, ProviderFailure> {
-    let mut candidates = Vec::new();
-    if let Some(report) = params.live_report.as_ref() {
-        let provider_session_id =
-            non_empty_string(Some(&report.provider_session_id)).ok_or_else(|| {
-                invalid_session_capture_params_failure(
-                    request_id,
-                    "live_report.provider_session_id must be non-empty",
-                )
-            })?;
-        candidates.push(session_identity_candidate(
-            provider_session_id,
-            "live_report.provider_session_id",
-        ));
-    }
-    push_session_identity_candidate(
-        &mut candidates,
-        launch_provider_session_id(params),
-        "launch.session.provider_session_id",
-    );
-    push_session_identity_candidate(
-        &mut candidates,
-        bare_provider_session_id(params),
-        "session_id",
-    );
-    push_session_identity_candidate(&mut candidates, pinned_target(params), "pinned_target");
-    push_session_identity_candidate(
-        &mut candidates,
-        start_bound_provider_session_id(params),
-        "start_bound_provider_session_id",
-    );
-    Ok(candidates)
-}
-
-fn push_session_identity_candidate(
-    candidates: &mut Vec<SessionIdentityCandidate>,
-    provider_session_id: Option<String>,
-    source: &'static str,
-) {
-    if let Some(provider_session_id) = provider_session_id {
-        candidates.push(session_identity_candidate(provider_session_id, source));
-    }
-}
-
-fn session_identity_candidate(
-    provider_session_id: String,
-    source: &'static str,
-) -> SessionIdentityCandidate {
-    SessionIdentityCandidate {
-        provider_session_id,
-        source,
-    }
-}
-
-fn validate_session_identity_candidates(
-    candidates: &[SessionIdentityCandidate],
-    request_id: &str,
-) -> Result<(), ProviderFailure> {
-    let Some(expected) = candidates.first() else {
-        return Ok(());
-    };
-    if let Some(conflict) = candidates
-        .iter()
-        .skip(1)
-        .find(|candidate| candidate.provider_session_id != expected.provider_session_id)
-    {
-        return Err(invalid_session_capture_params_failure(
-            request_id,
-            format!(
-                "conflicting session evidence: {} disagrees with {}",
-                conflict.source, expected.source
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn non_empty_string(value: Option<&str>) -> Option<String> {
+fn timestamp_ms(value: Option<&str>) -> Option<u64> {
     value
-        .filter(|text| !text.trim().is_empty())
-        .map(str::to_string)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .and_then(|d| u64::try_from(d.timestamp_millis()).ok())
 }
 
-fn capture_artifacts(provider_session_id: Option<&str>) -> Vec<Value> {
-    vec![json!({
-        "kind": "opencode-session-export-source",
-        "uri": source_id(provider_session_id),
-    })]
-}
-
-fn source_id(session_id: Option<&str>) -> String {
-    session_id
-        .map(|id| format!("{SOURCE_KIND}:{id}"))
-        .unwrap_or_else(|| SOURCE_KIND.to_string())
-}
-
-fn locate_transcript_result(session_id: Option<&str>) -> Value {
-    json!({
-        "located": false,
-        "format_id": NATIVE_FORMAT_ID,
-        "source_id": source_id(session_id),
-        "require_existing_observed": false,
-    })
-}
-
-fn read_turns_result(turns: Vec<Value>) -> Value {
-    json!({
-        "turn_count": turns.len(),
-        "turns": turns,
-        "complete": true,
-    })
-}
-
-fn capture_result(provider_session_id: Option<String>, source: &'static str) -> Value {
-    let artifacts = capture_artifacts(provider_session_id.as_deref());
-    let source_id = source_id(provider_session_id.as_deref());
-    json!({
-        "artifacts": artifacts,
-        "provider_session_id": provider_session_id,
-        "state": {
-            "format_id": NATIVE_FORMAT_ID,
-            "source_id": source_id,
-            "source": source,
-        },
-    })
-}
-
-fn export_result(bytes: &[u8], turn_count: usize) -> Value {
-    json!({
-        "canonical_format": CANONICAL_FORMAT,
-        "data_base64": encode_base64(bytes),
-        "sha256": sha256_hex(bytes),
-        "turn_count": turn_count,
-    })
-}
-
-fn session_replace_unsupported_failure(request_id: &str) -> ProviderFailure {
-    ProviderFailure::unsupported(
-        request_id,
-        "session_replace_unsupported",
-        "opencode does not provide a stable transcript import or replace API",
-    )
-}
-
-fn invalid_session_params_failure(request_id: &str, err: serde_json::Error) -> ProviderFailure {
-    invalid_session_params_message_failure(request_id, err)
-}
-
-fn invalid_session_params_message_failure(
-    request_id: &str,
-    err: impl std::fmt::Display,
-) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "invalid_session_params",
-        format!("session params are invalid: {err}"),
-    )
-}
-
-fn invalid_session_capture_params_failure(
-    request_id: &str,
-    err: impl std::fmt::Display,
-) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "invalid_session_capture_params",
-        format!("session.capture params are invalid: {err}"),
-    )
-}
-
-fn missing_session_id_failure(request_id: &str) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "missing_session_id",
-        "session params require non-empty session_id",
-    )
-}
-
-pub(crate) fn session_runtime(
-    host: &crate::envelope::HostContext,
-    settings_id: &str,
-    request_id: &str,
-) -> Result<NativeRuntimeContext, ProviderFailure> {
-    // Session storage is account-scoped; the settings record's model binding
-    // deliberately does not constrain read/enumerate/export operations.
-    let selection = resolve_runtime_selection(host, settings_id, request_id)?;
-    native_runtime::resolve_for_account(host, selection.account, request_id)
-}
-
-fn session_export_id_mismatch_failure(
-    request_id: &str,
-    actual: &str,
-    expected: &str,
-) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "session_export_id_mismatch",
-        format!("opencode export returned session_id {actual} instead of {expected}"),
-    )
-}
-
-fn session_record_id_mismatch_failure(
-    request_id: &str,
-    message_id: &str,
-    session_id: &str,
-    expected: &str,
-) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "session_record_id_mismatch",
-        format!(
-            "opencode message {message_id} belongs to session {session_id} instead of {expected}"
-        ),
-    )
-}
-
-fn session_record_missing_session_id_failure(
-    request_id: &str,
-    message_id: &str,
-) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "session_record_missing_session_id",
-        format!("opencode message {message_id} is missing info.sessionID"),
-    )
-}
-
-fn opencode_export_unavailable_failure(
-    request_id: &str,
-    session_id: &str,
-    message: String,
-) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "opencode_export_unavailable",
-        format!("failed to run opencode export for {session_id}: {message}"),
-    )
-}
-
-fn session_export_failed_failure(
-    request_id: &str,
-    session_id: &str,
-    status: Option<i32>,
-    stderr: &str,
-) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "session_export_failed",
-        format!(
-            "opencode export failed for {session_id} with status {:?}: {}",
-            status,
-            stderr.trim()
-        ),
-    )
-}
-
-fn invalid_opencode_export_failure(request_id: &str, message: String) -> ProviderFailure {
-    ProviderFailure::invalid_request(
-        request_id,
-        "invalid_opencode_export",
-        format!("opencode export output was not valid native JSON: {message}"),
-    )
-}
-
-fn launch_provider_session_id(params: &SessionCaptureParams) -> Option<String> {
-    params
-        .launch
-        .as_ref()
-        .and_then(|launch| launch.session.as_ref())
-        .and_then(|session| non_empty_string(session.provider_session_id.as_deref()))
-}
-
-fn bare_provider_session_id(params: &SessionCaptureParams) -> Option<String> {
-    non_empty_string(params.session_id.as_deref())
-}
-
-fn pinned_target(params: &SessionCaptureParams) -> Option<String> {
-    non_empty_string(params.pinned_target.as_deref())
-}
-
-fn start_bound_provider_session_id(params: &SessionCaptureParams) -> Option<String> {
-    non_empty_string(params.start_bound_provider_session_id.as_deref())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn user_observation_turn_omits_unselected_body() {
-        let message: OpencodeMessage = serde_json::from_value(json!({
-            "info": {
-                "id": "message-1",
-                "role": "user",
-                "sessionID": "session-1",
-                "time": { "created": 1 }
-            },
-            "parts": [{ "type": "text", "text": "body" }]
-        }))
-        .expect("user message");
-
-        let without_body =
-            user_observation_turn(&message, "session-1", false).expect("observation without body");
-        let with_body =
-            user_observation_turn(&message, "session-1", true).expect("observation with body");
-
-        assert!(!without_body
-            .as_object()
-            .expect("observation object")
-            .contains_key("body"));
-        assert_eq!(with_body["body"][0]["text"], "body");
+fn read_rollout(
+    path: &Path,
+    expected: Option<&str>,
+    request: &RequestEnvelope,
+) -> Result<Rollout, ProviderFailure> {
+    let file = File::open(path).map_err(|_| io_failure(request))?;
+    let len = file.metadata().map_err(|_| io_failure(request))?.len();
+    if len > MAX_ROLLOUT_BYTES {
+        return Err(ProviderFailure::internal(
+            &request.request_id,
+            "codex_rollout_capacity",
+            "Codex rollout exceeds the read size limit",
+        ));
     }
+    // Bound the read to a snapshot even while Codex appends to its rollout.
+    let mut reader = BufReader::new(file.take(len));
+    let mut meta: Option<RolloutMeta> = None;
+    let mut turns = Vec::new();
+    let mut complete = true;
+    let mut task_completed = None;
+    let mut line_no = 0;
+    loop {
+        let line = read_line(&mut reader, request)?;
+        if line.is_empty() {
+            break;
+        }
+        line_no += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(_) if !line.ends_with(b"\n") => {
+                complete = false;
+                break;
+            }
+            Err(_) => return Err(corrupt(request)),
+        };
+        if meta.is_none() {
+            let parsed = parse_meta(&value, request)?;
+            if expected.is_some_and(|id| id != parsed.id) {
+                return Err(corrupt(request));
+            }
+            meta = Some(parsed);
+            continue;
+        }
+        let payload = &value["payload"];
+        if value["type"] == "event_msg" {
+            match payload["type"].as_str() {
+                Some("task_complete" | "task_completed" | "turn_completed") => {
+                    task_completed = Some(true)
+                }
+                Some("task_started" | "turn_started" | "turn_aborted" | "error") => {
+                    task_completed = Some(false)
+                }
+                _ => (),
+            }
+        }
+        if value["type"] != "response_item" || payload["type"] != "message" {
+            continue;
+        }
+        let role = match payload["role"].as_str() {
+            Some("user") => "user",
+            Some("assistant") => "assistant",
+            _ => continue,
+        };
+        let timestamp = value["timestamp"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .ok_or_else(|| corrupt(request))?
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::AutoSi, true);
+        let id = &meta.as_ref().unwrap().id;
+        let turn_id = payload["id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{id}:line:{line_no}"));
+        let final_answer = payload["phase"] == "final_answer" || payload["phase"] == "final";
+        if role == "user" {
+            task_completed = Some(false);
+        }
+        if role == "assistant" && final_answer {
+            task_completed = Some(true);
+        }
+        turns.push(json!({"session_id":id, "turn_id":turn_id, "role":role,
+            "timestamp":timestamp, "body":content_chunks(&payload["content"]),
+            "native":{"message_id":payload["id"], "phase":payload["phase"],
+                "line":line_no, "completed":role == "user" || final_answer}}));
+    }
+    Ok(Rollout {
+        meta: meta.ok_or_else(|| corrupt(request))?,
+        turns,
+        complete,
+        task_completed,
+    })
+}
+
+pub(crate) fn content_chunks(value: &Value) -> Vec<Value> {
+    match value {
+        Value::String(text) => vec![json!({"type":"text", "text":text})],
+        Value::Array(parts) => parts.iter().flat_map(content_chunks).collect(),
+        Value::Object(part) => {
+            if let Some(text) = part
+                .get("text")
+                .or_else(|| part.get("content"))
+                .and_then(Value::as_str)
+            {
+                let kind = match part.get("type").and_then(Value::as_str) {
+                    None | Some("input_text" | "output_text") => "text",
+                    Some(kind) => kind,
+                };
+                vec![json!({"type":kind, "text":text})]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn read_turns(
+    path: &Path,
+    id: &str,
+    params: &SessionParams,
+    request: &RequestEnvelope,
+) -> Result<Value, ProviderFailure> {
+    if !matches!(
+        params.turn_projection.as_deref(),
+        None | Some("user_observation")
+    ) {
+        return Err(invalid(request, "Unsupported turn_projection"));
+    }
+    if !matches!(params.body_tail_limit, None | Some(1..=16)) {
+        return Err(invalid(request, "body_tail_limit must be between 1 and 16"));
+    }
+    let after = params
+        .after_timestamp
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .map_err(|_| invalid(request, "after_timestamp must be an RFC3339 timestamp"))
+        })
+        .transpose()?;
+    let rollout = read_rollout(path, Some(id), request)?;
+    let mut turns: Vec<Value> = rollout
+        .turns
+        .into_iter()
+        .filter(|turn| {
+            let timestamp =
+                DateTime::parse_from_rfc3339(turn["timestamp"].as_str().unwrap()).unwrap();
+            after.as_ref().is_none_or(|after| timestamp > *after)
+                && params.after_unix_ms.is_none_or(|after| {
+                    timestamp.timestamp_millis() > i64::try_from(after).unwrap_or(i64::MAX)
+                })
+                && (params.turn_projection.is_none() || turn["role"] == "user")
+        })
+        .collect();
+    if params.turn_projection.is_some() {
+        let body_start = turns
+            .len()
+            .saturating_sub(params.body_tail_limit.unwrap_or(4));
+        for (index, turn) in turns.iter_mut().enumerate() {
+            turn.as_object_mut().unwrap().remove("native");
+            if index < body_start {
+                turn.as_object_mut().unwrap().remove("body");
+            }
+        }
+    }
+    Ok(json!({"turn_count":turns.len(), "turns":turns, "complete":rollout.complete}))
+}
+
+fn capture(request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
+    let params: SessionParams = parse(&request.params, request)?;
+    let root = account_home(request, &params.settings_id)?;
+    if request.params.get("evidence").is_some() {
+        return Err(invalid(
+            request,
+            "The removed evidence field is unsupported",
+        ));
+    }
+    if let Some(report) = request.params.get("live_report") {
+        let object = report
+            .as_object()
+            .ok_or_else(|| invalid(request, "live_report must be an object"))?;
+        if object.len() != 2
+            || !["provider_session_id", "invocation_uuid"]
+                .iter()
+                .all(|key| {
+                    object
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+        {
+            return Err(invalid(
+                request,
+                "live_report requires a session ID and invocation UUID",
+            ));
+        }
+    }
+    let candidates = [
+        (
+            "/live_report/provider_session_id",
+            "live_report.provider_session_id",
+        ),
+        (
+            "/launch/session/provider_session_id",
+            "launch.session.provider_session_id",
+        ),
+        ("/session_id", "session_id"),
+        ("/pinned_target", "pinned_target"),
+        (
+            "/start_bound_provider_session_id",
+            "start_bound_provider_session_id",
+        ),
+    ];
+    let mut selected: Option<(&str, &str)> = None;
+    for (pointer, source) in candidates {
+        let Some(value) = request.params.pointer(pointer).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let id = value
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| invalid(request, "Session capture identity must be non-empty"))?;
+        validate_session_id(id, request)?;
+        if selected.is_some_and(|(expected, _)| expected != id) {
+            return Err(invalid(
+                request,
+                "Conflicting session capture identity evidence",
+            ));
+        }
+        selected.get_or_insert((id, source));
+    }
+    let Some((id, source)) = selected else {
+        return Ok(
+            json!({"provider_session_id":null,"state":{"source":"none","format_id":FORMAT_ID},"artifacts":[]}),
+        );
+    };
+    let path = locate(&root, id, request)?.ok_or_else(|| not_found(request))?;
+    let rollout = read_rollout(&path, Some(id), request)?;
+    if request.params.get("live_report").is_some() {
+        let invocation = request.params["invocation_uuid"]
+            .as_str()
+            .filter(|s| !s.is_empty());
+        if invocation.is_none()
+            || invocation
+                != request
+                    .params
+                    .pointer("/live_report/invocation_uuid")
+                    .and_then(Value::as_str)
+        {
+            return Err(invalid(
+                request,
+                "live_report.invocation_uuid must match invocation_uuid",
+            ));
+        }
+        let cwd = request
+            .host
+            .working_directory
+            .as_deref()
+            .filter(|s| !s.is_empty());
+        if cwd.is_none() || cwd.map(Path::new) != rollout.meta.cwd.as_deref().map(Path::new) {
+            return Err(invalid(
+                request,
+                "Live report workspace does not match the selected Codex rollout",
+            ));
+        }
+    }
+    Ok(json!({"provider_session_id":id,
+        "state":{"source":source,"source_id":source_id(id),"format_id":FORMAT_ID,
+            "transcript_complete":rollout.complete,"task_completed":rollout.task_completed},
+        "artifacts":[{"kind":"codex-rollout","path":path}]}))
+}
+
+fn enumerate(request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
+    let params: EnumerateParams = parse(&request.params, request)?;
+    let limit = params.limit.unwrap_or(100);
+    if limit == 0 || limit > MAX_PAGE_SIZE {
+        return Err(invalid(
+            request,
+            "Enumeration limit must be between 1 and 1000",
+        ));
+    }
+    let root = account_home(request, &params.settings_id)?;
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+    let mut identities = BTreeSet::new();
+    for path in rollout_paths(&root, request)? {
+        let meta = match metadata(&path, request) {
+            Ok(meta) => meta,
+            Err(_) => {
+                warnings.push("Skipped an unreadable or malformed Codex rollout".to_owned());
+                continue;
+            }
+        };
+        if !identities.insert(meta.id.clone()) {
+            return Err(ProviderFailure::conflict(
+                &request.request_id,
+                "codex_session_ambiguous",
+                "Multiple rollouts claim the same Codex session",
+                json!({}),
+            ));
+        }
+        let file_meta = fs::metadata(&path).map_err(|_| io_failure(request))?;
+        let modified = file_meta
+            .modified()
+            .ok()
+            .and_then(|s| s.duration_since(UNIX_EPOCH).ok());
+        let updated = modified
+            .and_then(|s| u64::try_from(s.as_millis()).ok())
+            .or(meta.created_unix_ms);
+        let mut turn_count = None;
+        if params.include_turn_count {
+            let rollout = read_rollout(&path, Some(&meta.id), request)?;
+            turn_count = Some(rollout.turns.len());
+            if !rollout.complete {
+                warnings.push("A Codex rollout has an incomplete final record".to_owned());
+            }
+        }
+        if params
+            .since_unix_ms
+            .is_some_and(|since| updated.is_some_and(|updated| updated < since))
+        {
+            continue;
+        }
+        let mut entry = json!({"provider_session_id":meta.id,
+            "created_unix_ms":meta.created_unix_ms,"updated_unix_ms":updated,
+            "source":{"kind":"codex.rollout","detail":path.to_string_lossy()}});
+        if params.include_cwd {
+            entry["cwd"] = json!(meta.cwd);
+        }
+        if params.include_turn_count {
+            entry["turn_count"] = json!(turn_count);
+        }
+        entries.push(entry);
+    }
+    entries.sort_by(|a, b| {
+        b["updated_unix_ms"]
+            .as_u64()
+            .cmp(&a["updated_unix_ms"].as_u64())
+            .then_with(|| {
+                a["provider_session_id"]
+                    .as_str()
+                    .cmp(&b["provider_session_id"].as_str())
+            })
+    });
+    warnings.sort();
+    warnings.dedup();
+    // A cursor cannot silently jump between accounts, projections, or changing populations.
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&json!({
+                "root":root,"settings_id":params.settings_id,"entries":entries,
+                "include_cwd":params.include_cwd,"include_turn_count":params.include_turn_count,
+                "since_unix_ms":params.since_unix_ms,"warnings":warnings
+            }))
+            .unwrap()
+        )
+    );
+    let offset = match params.cursor.as_deref() {
+        None => 0,
+        Some(cursor) => {
+            let pieces: Vec<_> = cursor.split(':').collect();
+            if pieces.len() != 3 || pieces[0] != "codex-v1" || pieces[1] != fingerprint {
+                return Err(ProviderFailure::conflict(&request.request_id, "codex_session_cursor_stale", "Enumeration cursor does not match this account or its current session population", json!({})));
+            }
+            pieces[2]
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n <= entries.len())
+                .ok_or_else(|| invalid(request, "Invalid Codex enumeration cursor"))?
+        }
+    };
+    let end = offset.saturating_add(limit).min(entries.len());
+    let complete = end == entries.len();
+    let cursor = (!complete).then(|| format!("codex-v1:{fingerprint}:{end}"));
+    Ok(
+        json!({"sessions":entries[offset..end],"complete":complete,"next_cursor":cursor,"warnings":warnings}),
+    )
 }

@@ -1,41 +1,16 @@
-//! Declared roles: accessor
-
 pub mod account;
-pub mod activity;
-mod child_custody;
 pub mod discovery;
 pub mod dispatch;
 mod durable_fs;
 pub mod encoding;
 pub mod envelope;
 pub mod launch;
-pub mod migration;
 pub mod models;
-mod native_identity_rebind;
-mod native_implementation_manifest;
 mod native_process;
-pub mod native_runtime;
-pub mod opencode;
-mod operation_bounds;
-pub mod path_guard;
 pub mod policy;
 pub mod quota;
-pub mod quota_adapter;
-mod quota_auth_refresh;
-pub mod quota_observer;
-mod request_custody;
-pub mod resume_observation;
-pub mod rotation;
-pub mod runtime_selection;
-pub mod schema;
 pub mod session;
-mod session_enumeration;
-pub mod settings;
-pub mod settings_definition;
-pub mod setup;
-pub mod shell;
+mod session_turn_pages;
 pub mod terminal;
-
-pub use dispatch::handle_invocation;
 pub use dispatch::write_invocation;
 pub use native_process::{run_native_effect_gate, NATIVE_EFFECT_GATE_ARG};

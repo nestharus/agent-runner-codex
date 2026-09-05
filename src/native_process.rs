@@ -16,7 +16,7 @@ use std::{os::fd::AsRawFd, os::unix::net::UnixStream};
 
 pub const NATIVE_EFFECT_GATE_ARG: &str = "__native_effect_gate";
 #[cfg(unix)]
-pub const NATIVE_EFFECT_GATE_FD_ENV: &str = "AGENT_RUNNER_OPENCODE_NATIVE_EFFECT_GATE_FD";
+pub const NATIVE_EFFECT_GATE_FD_ENV: &str = "AGENT_RUNNER_CODEX_NATIVE_EFFECT_GATE_FD";
 #[cfg(unix)]
 const TERMINATION_GRACE: Duration = Duration::from_millis(100);
 
@@ -286,7 +286,7 @@ pub(crate) fn terminate_process_group_child(child: &mut Child) -> Option<ExitSta
 #[cfg(unix)]
 fn exec_gate_program() -> io::Result<PathBuf> {
     let current = std::env::current_exe()?;
-    let binary_name = "agent-runner-opencode";
+    let binary_name = "agent-runner-codex";
     if current.file_name().and_then(|name| name.to_str()) == Some(binary_name) {
         return Ok(current);
     }
