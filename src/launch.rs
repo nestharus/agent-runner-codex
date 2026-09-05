@@ -395,6 +395,7 @@ pub fn native_args(
         "multi_agent_v2",
         "apps",
         "plugins",
+        "remote_plugin",
         "hooks",
         "image_generation",
         "view_image",

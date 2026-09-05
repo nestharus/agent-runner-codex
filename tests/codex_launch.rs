@@ -122,6 +122,8 @@ fn native_launch_preserves_environment_pins_account_and_publishes_real_completio
     let argv = calls["argv"].as_array().unwrap();
     assert!(argv.iter().any(|v| v == "features.shell_tool=false"));
     assert!(argv.iter().any(|v| v == "features.multi_agent=false"));
+    assert!(argv.iter().any(|v| v == "features.plugins=false"));
+    assert!(argv.iter().any(|v| v == "features.remote_plugin=false"));
     assert!(argv.iter().any(|v| v
         .as_str()
         .is_some_and(|v| v.starts_with("model_instructions_file="))));
