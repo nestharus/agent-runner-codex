@@ -1297,7 +1297,7 @@ time.sleep(30)"#
     if trigger == "sigterm" {
         assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
     }
-    // Never drain stdout during this wait. This is the supplied F1 relationship.
+    // Never drain stdout during this wait; keep the reader open and non-consuming.
     let stopped = wait_cli(&mut child, 5);
     if !stopped {
         cleanup_blocked_cli(&f, &mut child);

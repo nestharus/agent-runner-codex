@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline real CLI/installer checks with idle, open stdin (AGE-342 F2)."""
+"""Offline real CLI/installer checks with idle, open stdin."""
 import argparse
 import json
 import os
@@ -27,7 +27,7 @@ class IdleInputTests(unittest.TestCase):
 
     def idle_run(self, command, timeout=4):
         # wait(), unlike communicate(), does not close the pipe writer. Output
-        # goes to files so the F2 oracle cannot accidentally exercise F1 instead.
+        # goes to files so the idle-input check cannot block on output backpressure.
         self.counter += 1
         record = self.root / f'run-{self.counter}'
         record.mkdir()
