@@ -4,6 +4,7 @@ No model request leaves this process's HTTP server. No credentials are copied.
 """
 import argparse
 import http.server
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path('target/debug/agent-runner-codex'))
     parser.add_argument('--label', choices=[prefix+e for prefix in ['gpt-', 'codex-gpt-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']]+['codex-exec-bench'], default='gpt-high')
+    parser.add_argument('--output-dir', type=Path, help='Preserve isolated config, native request and raw results in a new directory')
     parser.add_argument('--positive-control', action='store_true', help='Remove user-config isolation and prove the injected project MCP appears')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
@@ -24,6 +26,8 @@ def main():
              else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
              else 'gpt-5.6-sol' if args.label.startswith('gpt-sol-') else 'gpt-6-astra')
     effort = 'low' if args.label == 'codex-exec-bench' else args.label.rsplit('-', 1)[-1]
+    if args.label in ['gpt-high', 'gpt-xhigh', 'gpt-max']:
+        effort = 'medium'
     route_args = ['-m', model, '-c', 'model_reasoning_effort='+json.dumps(effort)]
     captured = []
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -39,7 +43,10 @@ def main():
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        with tempfile.TemporaryDirectory(prefix='codex-inventory-') as directory:
+        if args.output_dir:
+            args.output_dir.mkdir(parents=True, exist_ok=False)
+        directory_context = nullcontext(str(args.output_dir.resolve())) if args.output_dir else tempfile.TemporaryDirectory(prefix='codex-inventory-')
+        with directory_context as directory:
             root = Path(directory)
             (root / '.codex').mkdir()
             workspace = root / 'project'
@@ -76,7 +83,12 @@ def main():
                 'host': {'app': 'inventory-test', 'config_root': str(config_root), 'data_root': str(root/'data'), 'env': {'HOME': str(root)}},
                 'params': {'settings_id': 'codex', 'mode': 'arg', 'model': {'name': args.label, 'provider_args': route_args, 'inputs': {'prompt': 'Return an empty completed response.', 'named': {}}},
                     'argv': ['codex','exec','--dangerously-bypass-approvals-and-sandbox',*route_args], 'working_directory': str(workspace), 'env': {}}}
+            (root / 'request.json').write_text(json.dumps(request, indent=2)+'\n')
             result = subprocess.run([str(args.binary.resolve()), 'launch'], input=json.dumps(request), text=True, capture_output=True, timeout=45)
+            (root / 'stdout.raw').write_text(result.stdout)
+            (root / 'stderr.raw').write_text(result.stderr)
+            (root / 'exit-status.txt').write_text(str(result.returncode)+'\n')
+            (root / 'responses-requests.json').write_text(json.dumps(captured, indent=2)+'\n')
             assert result.returncode == 0, result.stdout + result.stderr
             assert len(captured) == 1, f'Expected one local Responses request, got {len(captured)}'
             body = captured[0]

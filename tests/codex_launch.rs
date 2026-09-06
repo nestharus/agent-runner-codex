@@ -1,3 +1,4 @@
+mod support;
 use agent_runner_codex::{dispatch::write_invocation, encoding::encode_base64};
 use serde_json::{json, Value};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
@@ -15,6 +16,11 @@ fn executable(path: &Path, text: &str) {
 struct Fixture {
     root: tempfile::TempDir,
     request: Value,
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        support::preserve_fixture(self.root.path());
+    }
 }
 impl Fixture {
     fn new() -> Self {
@@ -67,42 +73,125 @@ for event in [{'type':'thread.started','thread_id':'11111111-2222-3333-4444-5555
         )
     }
 }
+fn astra_request(f: &Fixture, label: &str, effort: &str) -> Value {
+    let args = json!([
+        "-m",
+        "gpt-6-astra",
+        "-c",
+        format!("model_reasoning_effort=\"{effort}\"")
+    ]);
+    let mut request = f.request.clone();
+    request["request_id"] = json!(label);
+    request["params"]["model"]["name"] = json!(label);
+    request["params"]["model"]["provider_args"] = args.clone();
+    let mut argv = vec![
+        json!("codex2"),
+        json!("exec"),
+        json!("--dangerously-bypass-approvals-and-sandbox"),
+    ];
+    argv.extend(args.as_array().unwrap().iter().cloned());
+    request["params"]["argv"] = json!(argv);
+    request["params"]["launch"] = json!({"argv": argv, "env": {}});
+    request
+}
+
 #[test]
-fn standard_labels_launch_the_same_astra_configuration_as_temporary_aliases() {
-    for effort in ["low", "medium", "high", "xhigh", "max"] {
-        let f = Fixture::new();
-        let model_args = json!([
-            "-m",
-            "gpt-6-astra",
-            "-c",
-            format!("model_reasoning_effort=\"{effort}\"")
-        ]);
-        for prefix in ["codex-gpt-", "gpt-"] {
-            let mut request = f.request.clone();
-            request["request_id"] = json!(format!("{prefix}{effort}"));
-            request["params"]["model"]["name"] = json!(format!("{prefix}{effort}"));
-            request["params"]["model"]["provider_args"] = model_args.clone();
-            let mut argv = vec![
-                json!("codex2"),
-                json!("exec"),
-                json!("--dangerously-bypass-approvals-and-sandbox"),
-            ];
-            argv.extend(model_args.as_array().unwrap().iter().cloned());
-            request["params"]["argv"] = json!(argv);
-            let (code, events) = f.invoke("launch", &request);
-            assert_eq!(code, 0, "{prefix}{effort}: {events:?}");
-        }
-        let calls: Vec<Value> = fs::read_to_string(f.root.path().join("calls.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(
-            calls[0], calls[1],
-            "Native configuration changed between aliases for {effort}"
-        );
+fn astra_standard_and_compatibility_native_argv_are_independently_checked() {
+    for (label, effort) in [
+        ("gpt-low", "low"),
+        ("gpt-medium", "medium"),
+        ("gpt-high", "medium"),
+        ("gpt-xhigh", "medium"),
+        ("gpt-max", "medium"),
+        ("codex-gpt-low", "low"),
+        ("codex-gpt-medium", "medium"),
+        ("codex-gpt-high", "high"),
+        ("codex-gpt-xhigh", "xhigh"),
+        ("codex-gpt-max", "max"),
+    ] {
+        assert_astra_launch(label, effort);
     }
+}
+
+fn assert_astra_launch(label: &str, effort: &str) {
+    let f = Fixture::new();
+    let request = astra_request(&f, label, effort);
+    let (code, response) = f.invoke("policy.evaluate", &request);
+    assert_eq!(code, 0);
+    assert_eq!(
+        response[0]["result"]["accepted"], true,
+        "{label}: {response:?}"
+    );
+    assert_eq!(
+        response[0]["result"]["markers"][0]["value"]["effort"],
+        effort
+    );
+    let (code, events) = f.invoke("launch", &request);
+    assert_eq!(code, 0, "{label}: {events:?}");
+    let calls: Vec<Value> = fs::read_to_string(f.root.path().join("calls.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(calls.len(), 1);
+    let argv = calls[0]["argv"].as_array().unwrap();
+    assert!(argv
+        .windows(2)
+        .any(|pair| pair == [json!("-m"), json!("gpt-6-astra")]));
+    let native_efforts: Vec<_> = argv
+        .iter()
+        .filter(|arg| {
+            arg.as_str()
+                .is_some_and(|s| s.starts_with("model_reasoning_effort="))
+        })
+        .collect();
+    assert_eq!(
+        native_efforts,
+        [&json!(format!("model_reasoning_effort=\"{effort}\""))],
+        "{label}"
+    );
+}
+
+#[test]
+fn astra_stale_standard_efforts_are_rejected_before_spawn() {
+    for effort in ["high", "xhigh", "max"] {
+        assert_stale_astra_rejected(effort);
+    }
+}
+
+fn assert_stale_astra_rejected(effort: &str) {
+    let f = Fixture::new();
+    let label = format!("gpt-{effort}");
+    let mut request = astra_request(&f, &label, effort);
+    let (_, response) = f.invoke("policy.evaluate", &request);
+    assert_eq!(
+        response[0]["result"]["accepted"], false,
+        "{label}: {response:?}"
+    );
+    assert_eq!(
+        response[0]["result"]["diagnostics"][0]["code"],
+        "model_args_mismatch"
+    );
+    let (code, response) = f.invoke("launch", &request);
+    assert_ne!(code, 0);
+    assert_eq!(response[0]["error"]["code"], "model_args_mismatch");
+    // Matching provider_args must not launder a stale (or appended) argv override.
+    request["params"]["model"]["provider_args"] = json!([
+        "-m",
+        "gpt-6-astra",
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ]);
+    let (_, response) = f.invoke("policy.evaluate", &request);
+    assert_eq!(response[0]["result"]["accepted"], false);
+    assert_eq!(
+        response[0]["result"]["diagnostics"][0]["code"],
+        "unmanaged_argv"
+    );
+    let (code, response) = f.invoke("launch", &request);
+    assert_ne!(code, 0);
+    assert_eq!(response[0]["error"]["code"], "unmanaged_argv");
+    assert!(!f.root.path().join("calls.jsonl").exists());
 }
 
 #[test]

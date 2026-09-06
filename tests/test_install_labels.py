@@ -1,5 +1,8 @@
 """Exercise label migration and rollback backups with the built provider."""
 import argparse
+import json
+import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +20,7 @@ class LabelInstallerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='codex-label-test-')
         self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self.preserve_evidence)
         self.root = Path(self.temp.name)
         self.config = self.root / 'config'
         self.models = self.config / 'models'
@@ -37,6 +41,11 @@ class LabelInstallerTests(unittest.TestCase):
         (self.models / 'codex-gpt-high.toml').write_text('# existing temporary Astra route\n')
         (self.models / 'codex-exec-bench.toml').write_text('# isolated benchmark sentinel\n')
 
+    def preserve_evidence(self):
+        destination = os.environ.get('CODEX_TEST_EVIDENCE_DIR')
+        if destination:
+            shutil.copytree(self.root, Path(destination) / self.id(), symlinks=True)
+
     def install(self, *extra, provider=None, family='luna'):
         return subprocess.run([
             sys.executable, str(REPO / 'scripts/install-labels.py'),
@@ -44,6 +53,85 @@ class LabelInstallerTests(unittest.TestCase):
             '--stage-root', str(self.root / 'stage'), '--provider-path', str(provider or PROVIDER),
             *extra,
         ], capture_output=True, text=True, timeout=20)
+
+    def standard_fixture(self):
+        for effort in EFFORTS:
+            route = ('# Preserve standard route formatting and comments.\n'
+                     f'provider = {{ path = "{PROVIDER}" }}\n'
+                     '[[inputs]]\ndefault_input = true\ndescription = "The text prompt"\n'
+                     'name = "prompt"\nrequired = true\ntype = "string"\n')
+            args = json.dumps(["-m", "gpt-6-astra", "-c", f'model_reasoning_effort="{effort}"'])
+            route += ''.join(
+                f'\n[[providers]]\nargs = {args}\ninteractive_args = {args}\n'
+                f'name = "{account}"\n' for account in ACCOUNTS)
+            (self.models / f'gpt-{effort}.toml').write_text(route)
+        (self.models / 'gpt-sol-high.toml').write_text('# unrelated Sol sentinel\n')
+        return {p.name: p.read_bytes() for p in self.models.iterdir()}
+
+    def assert_standard_routes(self, directory):
+        for label in EFFORTS:
+            route = tomllib.loads((directory / f'gpt-{label}.toml').read_text())
+            effort = 'low' if label == 'low' else 'medium'
+            expected = ['-m', 'gpt-6-astra', '-c', f'model_reasoning_effort="{effort}"']
+            self.assertEqual([p['name'] for p in route['providers']], ACCOUNTS)
+            for account in route['providers']:
+                self.assertEqual(account['args'], expected, label)
+                self.assertEqual(account['interactive_args'], expected, label)
+
+    def test_standard_staging_maps_only_affected_efforts_without_mutation(self):
+        before = self.standard_fixture()
+        result = self.install(family='standard')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_standard_routes(self.root / 'stage/models')
+        self.assertEqual({p.name: p.read_bytes() for p in self.models.iterdir()}, before)
+        self.assertEqual((self.config / 'providers.toml').read_text(), self.original_providers)
+
+    def test_standard_apply_backs_up_affected_routes_preserves_unchanged_bytes(self):
+        before = self.standard_fixture()
+        result = self.install('--apply', family='standard')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_standard_routes(self.models)
+        affected = {'gpt-high.toml', 'gpt-xhigh.toml', 'gpt-max.toml'}
+        for name, content in before.items():
+            if name not in affected:
+                self.assertEqual((self.models / name).read_bytes(), content, name)
+        self.assertEqual(set(p.name for p in self.models.iterdir()), set(before))
+        backups = list((self.config / 'backups').glob('codex-astra-*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / 'providers.toml').read_text(), self.original_providers)
+        for name in affected:
+            self.assertEqual((backups[0] / 'models' / name).read_bytes(), before[name])
+        applied = {p.name: p.read_bytes() for p in self.models.iterdir()}
+        again = self.install('--apply', family='standard')
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual({p.name: p.read_bytes() for p in self.models.iterdir()}, applied)
+
+    def test_standard_stale_discovery_rejects_apply_without_mutation(self):
+        before = self.standard_fixture()
+        old = self.root / 'stale-provider'
+        old.write_text('#!/usr/bin/env python3\nimport json,subprocess,sys\n'
+                       f'r=subprocess.run([{str(PROVIDER)!r}, *sys.argv[1:]], input=sys.stdin.read(), capture_output=True, text=True)\n'
+                       'v=json.loads(r.stdout)\n'
+                       'for e in v["result"]["models"]:\n'
+                       ' if e["name"] in ["gpt-high","gpt-xhigh","gpt-max"]: e["provider_args"][3]="model_reasoning_effort="+json.dumps(e["name"].split("-")[-1])\n'
+                       'print(json.dumps(v))\n')
+        old.chmod(0o755)
+        result = self.install('--apply', family='standard', provider=old)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("model, arguments, or eligible accounts do not match", result.stderr)
+        self.assertEqual({p.name: p.read_bytes() for p in self.models.iterdir()}, before)
+        self.assertEqual((self.config / 'providers.toml').read_text(), self.original_providers)
+        self.assertFalse((self.config / 'backups').exists())
+
+    def test_checked_in_standard_and_compatibility_examples(self):
+        for prefix in ['gpt', 'codex-gpt']:
+            for label in EFFORTS:
+                route = tomllib.loads((REPO / f'examples/models/{prefix}-{label}.toml').read_text())
+                effort = ('low' if label == 'low' else 'medium') if prefix == 'gpt' else label
+                expected = ['-m', 'gpt-6-astra', '-c', f'model_reasoning_effort="{effort}"']
+                for account in route['providers']:
+                    self.assertEqual(account['args'], expected)
+                    self.assertEqual(account['interactive_args'], expected)
 
     def test_luna_apply_preserves_other_labels_and_backs_up_replaced_routes(self):
         self.assert_family_apply('luna')

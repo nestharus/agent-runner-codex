@@ -24,9 +24,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('target/debug/agent-runner-codex'))
     parser.add_argument('--label', default='gpt-luna-low', choices=[prefix+e for prefix in ['gpt-', 'codex-gpt-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']])
+    parser.add_argument('--no-model', action='store_true', help='Omit --model to check the managed gpt-xhigh default (Astra/medium)')
     parser.add_argument('--output-dir', type=Path)
     args = parser.parse_args()
     args.binary = args.binary.resolve()
+    if args.no_model:
+        args.label = 'gpt-xhigh'
+    effort = 'medium' if args.label in ['gpt-high', 'gpt-xhigh', 'gpt-max'] else args.label.rsplit('-', 1)[1]
     repo = Path(__file__).resolve().parents[1]
     root = (args.output_dir or Path(tempfile.mkdtemp(prefix='codex-tui-inventory-'))).absolute()
     root.mkdir(parents=True, exist_ok=True)
@@ -92,7 +96,7 @@ def main():
     if pid == 0:
         fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
         os.chdir(workspace)
-        os.execve(str(args.binary.resolve()),[str(args.binary.resolve()),'interactive','--settings-id','codex','--config-root',str(config),'--model',args.label,'--prompt','Call Bash once, then finish.'],environment)
+        os.execve(str(args.binary.resolve()),[str(args.binary.resolve()),'interactive','--settings-id','codex','--config-root',str(config),*([] if args.no_model else ['--model',args.label]),'--prompt','Call Bash once, then finish.'],environment)
     reaped=False
     terminal=b''
     try:
@@ -120,7 +124,7 @@ def main():
                else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
                else 'gpt-5.6-sol' if args.label.startswith('gpt-sol-') else 'gpt-6-astra')
         assert body['model']==model
-        assert body['reasoning']['effort']==args.label.rsplit('-',1)[1]
+        assert body['reasoning']['effort']==effort, body['reasoning']
         tools=list(body.get('tools',[]))
         for item in body.get('input',[]):
             if item.get('type')=='additional_tools':tools.extend(item.get('tools',[]))
@@ -149,7 +153,7 @@ def main():
             if first.get('payload',{}).get('id')==session:matches.append(path)
         assert len(matches)==1,matches
         assert json.loads(matches[0].open().readline())['payload']['cwd']==str(workspace)
-        result={'passed':True,'mode':'native_tui','model':model,'label':args.label,'tools':names,'system_prompt_exact':True,'account_instructions':True,'session_id':session,'metadata_binding':True,'original_user_and_project_mcp_excluded':True,'artifacts':str(root)}
+        result={'passed':True,'mode':'native_tui','model':model,'label':args.label,'effort':effort,'no_model':args.no_model,'tools':names,'system_prompt_exact':True,'account_instructions':True,'session_id':session,'metadata_binding':True,'original_user_and_project_mcp_excluded':True,'artifacts':str(root)}
         (root/'result.json').write_text(json.dumps(result,indent=2)+'\n')
         print(json.dumps(result,indent=2))
     finally:
