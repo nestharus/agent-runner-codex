@@ -114,7 +114,13 @@ completed retries replay without another model turn. Reusing a request ID with
 changed inputs fails. Interrupted requests require reconciliation, preventing an
 ambiguous invocation from being silently submitted twice. Native effects begin
 only after durable process-group identity publication; cleanup retains process
-group ownership on errors, cancellation, and host deadlines.
+group ownership on errors, cancellation, and host deadlines. CLI launch output
+uses nonblocking writes with a two-second no-progress limit, so an open host
+pipe that stops consuming cannot indefinitely delay native-group cleanup.
+Delivery failure exits nonzero and does not append another response to a partial
+event. Incomplete requests retain their journal and require reconciliation;
+they do not claim a completed output receipt or silently execute again. A failed
+delivery of an already-completed replay leaves its durable receipt unchanged.
 
 Session capture, lookup, reads, and enumeration understand native Codex JSONL
 rollouts, including archived sessions, fork metadata, partial trailing writes,
@@ -137,6 +143,7 @@ being exposed as a Codex capability with different semantics.
 cargo test
 cargo build --release
 python3 tests/test_install_labels.py --binary target/release/agent-runner-codex
+python3 tests/test_cli_install.py --binary target/release/agent-runner-codex
 python3 integrations/codex/test_mcp.py
 python3 tests/verify_codex_inventory.py --binary target/release/agent-runner-codex
 ```
@@ -145,7 +152,9 @@ Install the release binary and `integrations/` tree with
 `python3 scripts/install-provider.py`. The destination is
 `~/.config/oulipoly-agent-runner/agent-runner-codex/`; its `config.toml` contains
 absolute paths for `codex_bin`, `bun_bin`, `bash_mcp_path`, `system_prompt_file`,
-`agent_bash_bin`, and `agent_runner_bin`.
+`agent_bash_bin`, and `agent_runner_bin`. The provider `--version` command does
+not read an envelope or wait for stdin; the installer also probes with stdin
+explicitly disconnected.
 
 Stage and activate the temporary labels after installing and validating the
 provider:

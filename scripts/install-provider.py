@@ -77,7 +77,7 @@ def main():
     binary = executable("agent-runner-codex", args.binary)
     installed_bash = absolute(args.opencode_bash)
     bash_sha = validate_bash(installed_bash)
-    version = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=10)
+    version = subprocess.run([str(binary), "--version"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
     if version.returncode != 0 or not version.stdout.startswith("agent-runner-codex "):
         raise ValueError("The build artifact did not identify itself as agent-runner-codex")
     prompt = absolute(args.system_prompt_file)

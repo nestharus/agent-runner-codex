@@ -1155,3 +1155,345 @@ fn unavailable_launch_remains_compatible_with_unselected_hosts() {
     assert_eq!(signal["kind"], "nonzero_exit");
     assert_eq!(signal["evidence"], "codex.exec: server_overloaded");
 }
+
+// Real CLI pipe tests: an open read end is deliberately not drained until the
+// provider exits. A small pipe makes the blocking relationship independent of
+// machine defaults; the journal proves a data event reached delivery.
+#[cfg(target_os = "linux")]
+fn backpressured_cli(f: &Fixture, request: &Value) -> std::process::Child {
+    use std::{
+        io::Write,
+        os::fd::AsRawFd,
+        process::{Command, Stdio},
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"))
+        .arg("launch")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        unsafe {
+            libc::fcntl(
+                child.stdout.as_ref().unwrap().as_raw_fd(),
+                libc::F_SETPIPE_SZ,
+                4096,
+            )
+        },
+        4096
+    );
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(request).unwrap())
+        .unwrap();
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        let pending = pending_output(&child);
+        let journal = launch_journal(f);
+        if pending > 0 && journal.len() > 128 * 1024 {
+            let info = fs::read_to_string(format!("/proc/{}/fdinfo/1", child.id())).unwrap();
+            let flags = info
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .unwrap();
+            let flags = i32::from_str_radix(flags.trim(), 8).unwrap();
+            assert_eq!(
+                flags & libc::O_NONBLOCK,
+                0,
+                "inherited stdout flags were changed"
+            );
+            return child;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    cleanup_blocked_cli(f, &mut child);
+    panic!("native output did not reach the held-open host pipe");
+}
+
+#[cfg(target_os = "linux")]
+fn pending_output(child: &std::process::Child) -> i32 {
+    use std::os::fd::AsRawFd;
+    let mut pending = 0;
+    assert_eq!(
+        unsafe {
+            libc::ioctl(
+                child.stdout.as_ref().unwrap().as_raw_fd(),
+                libc::FIONREAD,
+                &mut pending,
+            )
+        },
+        0
+    );
+    pending
+}
+
+fn launch_journal(f: &Fixture) -> Vec<u8> {
+    let root = f.root.path().join("data/provider-state/codex/launch");
+    let Ok(files) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    files
+        .flatten()
+        .find(|file| file.path().extension().is_some_and(|e| e == "jsonl"))
+        .map(|file| fs::read(file.path()).unwrap())
+        .unwrap_or_default()
+}
+
+fn native_group(f: &Fixture) -> i32 {
+    fs::read_to_string(f.root.path().join("calls.jsonl"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+fn cleanup_blocked_cli(f: &Fixture, child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+    if f.root.path().join("calls.jsonl").exists() {
+        unsafe {
+            libc::kill(-native_group(f), libc::SIGKILL);
+        }
+    }
+}
+
+fn wait_cli(child: &mut std::process::Child, seconds: u64) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(seconds) {
+        if child.try_wait().unwrap().is_some() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn assert_blocked_delivery_fails_safely(trigger: &str, channel: &str) {
+    let f = Fixture::new();
+    fake_native(
+        &f,
+        &format!(
+            r#"import subprocess
+sys.stdin.read()
+subprocess.Popen(['sleep','30'])
+open(os.environ['CALLS'],'w').write(str(os.getpid()))
+print(json.dumps({{'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'}}),flush=True)
+if {channel:?} == 'stderr':
+ sys.stderr.write('x'*(256*1024)+'\n');sys.stderr.flush()
+else:
+ print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'x'*(256*1024)}}}}),flush=True)
+time.sleep(30)"#
+        ),
+    );
+    let mut request = output_request(&f);
+    if trigger == "deadline" {
+        request["host"]["deadline_unix_ms"] = json!(now_ms() + 1500);
+    }
+    let mut child = backpressured_cli(&f, &request);
+    if trigger == "sigterm" {
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    }
+    // Never drain stdout during this wait. This is the supplied F1 relationship.
+    let stopped = wait_cli(&mut child, 5);
+    if !stopped {
+        cleanup_blocked_cli(&f, &mut child);
+    }
+    assert!(
+        stopped,
+        "provider stalled with open non-consuming reader: {trigger}/{channel}"
+    );
+    assert!(pending_output(&child) > 0);
+    assert_eq!(
+        unsafe { libc::kill(-native_group(&f), 0) },
+        -1,
+        "native group survived {trigger}/{channel}"
+    );
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("oulipoly.launch_output_complete/v1"));
+    let journal = launch_journal(&f);
+    assert!(
+        journal.starts_with(&output.stdout),
+        "failed output was not a journal prefix"
+    );
+    let events: Vec<Value> = journal
+        .split(|b| *b == b'\n')
+        .filter(|b| !b.is_empty())
+        .map(|b| serde_json::from_slice(b).unwrap())
+        .collect();
+    assert!(events.iter().any(|e| e["kind"] == channel));
+    assert!(!events
+        .iter()
+        .any(|e| e["kind"] == "exit" || e["name"] == "oulipoly.launch_output_complete/v1"));
+    let state_dir = f.root.path().join("data/provider-state/codex/launch");
+    let state_file = fs::read_dir(state_dir)
+        .unwrap()
+        .flatten()
+        .find(|e| e.path().extension().is_some_and(|e| e == "json"))
+        .unwrap();
+    let state: Value = serde_json::from_slice(&fs::read(state_file.path()).unwrap()).unwrap();
+    assert_eq!(state["phase"], "running");
+    assert!(
+        state["journal_sha256"].is_null()
+            && state["journal_len"].is_null()
+            && state["exit_code"].is_null()
+    );
+    let before_calls = fs::read(f.root.path().join("calls.jsonl")).unwrap();
+    let retry = f.invoke("launch", &request);
+    assert_ne!(retry.0, 0);
+    assert_eq!(
+        retry.1[0]["error"]["code"],
+        "launch_reconciliation_required"
+    );
+    assert_eq!(
+        before_calls,
+        fs::read(f.root.path().join("calls.jsonl")).unwrap()
+    );
+    assert_eq!(journal, launch_journal(&f));
+    if let Some(destination) = std::env::var_os("CODEX_TEST_EVIDENCE_DIR") {
+        let destination = Path::new(&destination).join(format!("blocked-{trigger}-{channel}"));
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(
+            destination.join("request.json"),
+            serde_json::to_vec_pretty(&request).unwrap(),
+        )
+        .unwrap();
+        fs::write(destination.join("journal.jsonl"), journal).unwrap();
+        fs::write(
+            destination.join("state.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        fs::write(destination.join("stdout.raw"), output.stdout).unwrap();
+        fs::write(destination.join("stderr.raw"), output.stderr).unwrap();
+        fs::write(destination.join("result.json"), json!({"trigger":trigger,"channel":channel,"exit_code":output.status.code(),"native_group_gone":true,"retry":retry.1}).to_string()).unwrap();
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn held_open_output_pipe_cannot_strand_cancellation_deadline_or_cleanup() {
+    for trigger in ["sigterm", "deadline", "delivery_timeout"] {
+        for channel in ["stdout", "stderr"] {
+            assert_blocked_delivery_fails_safely(trigger, channel);
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn temporarily_backpressured_cli_delivers_truthful_receipt_and_exact_replay() {
+    let f = Fixture::new();
+    fake_native(
+        &f,
+        r#"sys.stdin.read()
+open(os.environ['CALLS'],'a').write('one-turn\n')
+print(json.dumps({'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'}),flush=True)
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'x'*(256*1024)}}),flush=True)
+print(json.dumps({'type':'turn.completed'}),flush=True)"#,
+    );
+    let request = output_request(&f);
+    let child = backpressured_cli(&f, &request);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events: Vec<Value> = output
+        .stdout
+        .split(|b| *b == b'\n')
+        .filter(|b| !b.is_empty())
+        .map(|b| serde_json::from_slice(b).unwrap())
+        .collect();
+    assert_complete_output(&events);
+    assert_eq!(output.stdout, launch_journal(&f));
+    // A blocked replay must fail delivery, not alter the durable completion or
+    // execute a second native turn. A subsequent draining retry remains exact.
+    let mut replay = backpressured_cli(&f, &request);
+    let stopped = wait_cli(&mut replay, 5);
+    if !stopped {
+        let _ = replay.kill();
+        let _ = replay.wait();
+    }
+    assert!(stopped, "completed replay blocked indefinitely");
+    assert!(!replay.wait_with_output().unwrap().status.success());
+    let retry = f.invoke("launch", &request);
+    assert_eq!(retry, (0, events));
+    assert_eq!(
+        fs::read_to_string(f.root.path().join("calls.jsonl")).unwrap(),
+        "one-turn\n"
+    );
+    assert_eq!(output.stdout, launch_journal(&f));
+}
+
+#[test]
+fn cli_launch_preserves_file_offset_and_draining_socket_output() {
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixStream,
+        process::{Command, Stdio},
+    };
+    let f = Fixture::new();
+    let path = f.root.path().join("file-output");
+    let mut destination = fs::File::create(&path).unwrap();
+    destination.write_all(b"existing-prefix\n").unwrap();
+    let mut file_child = Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"))
+        .arg("launch")
+        .stdin(Stdio::piped())
+        .stdout(destination)
+        .spawn()
+        .unwrap();
+    file_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&output_request(&f)).unwrap())
+        .unwrap();
+    assert!(wait_cli(&mut file_child, 5));
+    assert!(file_child.wait().unwrap().success());
+    let bytes = fs::read(path).unwrap();
+    assert!(bytes.starts_with(b"existing-prefix\n"));
+    assert_eq!(&bytes[b"existing-prefix\n".len()..], launch_journal(&f));
+
+    // Replay the same result over a socket: no new native turn, no alteration
+    // of the inherited socket's file status flags.
+    let (mut reader, writer) = UnixStream::pair().unwrap();
+    let retained = writer.try_clone().unwrap();
+    use std::os::fd::{AsRawFd, OwnedFd};
+    let original_flags = unsafe { libc::fcntl(retained.as_raw_fd(), libc::F_GETFL) };
+    let fd: OwnedFd = writer.into();
+    let mut socket_child = Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"))
+        .arg("launch")
+        .stdin(Stdio::piped())
+        .stdout(fd)
+        .spawn()
+        .unwrap();
+    socket_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&output_request(&f)).unwrap())
+        .unwrap();
+    assert!(wait_cli(&mut socket_child, 5));
+    assert!(socket_child.wait().unwrap().success());
+    assert_eq!(
+        unsafe { libc::fcntl(retained.as_raw_fd(), libc::F_GETFL) },
+        original_flags
+    );
+    drop(retained);
+    let mut output = Vec::new();
+    reader.read_to_end(&mut output).unwrap();
+    let events: Vec<Value> = output
+        .split(|b| *b == b'\n')
+        .filter(|b| !b.is_empty())
+        .map(|b| serde_json::from_slice(b).unwrap())
+        .collect();
+    assert_complete_output(&events);
+    assert_eq!(output, launch_journal(&f));
+}
