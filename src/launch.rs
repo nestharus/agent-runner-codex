@@ -658,6 +658,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     if let Some(id) = session {
         env.insert("AGENT_RUNNER_CODEX_SESSION_ID".into(), id.into());
     }
+    crate::request_control::bind(request, &mut env, &root)?;
     verify_version(&config, &env, request)?;
     // This file is private and fresh for this request. MCP waits for native identity.
     let mut session_file_options = OpenOptions::new();
@@ -682,6 +683,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         "AGENT_RUNNER_CODEX_INTERACTIVE",
         "AGENT_RUNNER_CODEX_SESSION_BINDING",
         "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS",
+        crate::request_control::BINDING_ENV,
     ] {
         gate.command_mut().env_remove(key);
     }

@@ -4,6 +4,9 @@ use std::io::Read;
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).map(String::as_str) == Some("request-control") {
+        std::process::exit(agent_runner_codex::request_control::run(&args[2..]));
+    }
     if args.get(1).map(String::as_str) == Some(agent_runner_codex::NATIVE_EFFECT_GATE_ARG) {
         std::process::exit(agent_runner_codex::run_native_effect_gate(&args));
     }

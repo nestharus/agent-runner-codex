@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { createRequire } from "node:module"
 import type { StringArgument } from "./opencode-tool-shim"
+import { activate, secret, type Pending } from "./request-control"
 
 // Do not edit or translate this implementation: keep its bytes equal to OpenCode.
 const overridePath = new URL("../opencode/tools/bash.ts", import.meta.url).pathname
@@ -98,23 +99,37 @@ function parseArguments(value: unknown): BashArgs {
   return value as BashArgs
 }
 
-export async function callBash(args: unknown, abort: AbortSignal, metadata?: unknown): Promise<string> {
+export async function callBash(args: unknown, abort: AbortSignal, metadata?: unknown, onSession?: (id: string) => void): Promise<string> {
   const parsed = parseArguments(args)
   const owner = await sessionId(5000, metadata)
+  onSession?.(owner)
   return bash.execute(parsed, { sessionID: owner, abort } as Parameters<typeof bash.execute>[1])
 }
 
 export async function serve() {
-  const active = new Map<RpcId, { controller: AbortController; promise: Promise<void> }>()
+  const active = new Map<RpcId, Pending>()
+  const abort = (id: RpcId, generation?: string) => {
+    const pending = active.get(id)
+    if (!pending || (generation !== undefined && generation !== pending.generation) || pending.controller.signal.aborted) return false
+    pending.controller.abort()
+    return true
+  }
+  const control = await activate(active, abort)
   let closing = false
   const send = (value: unknown) => {
     if (!closing) process.stdout.write(`${JSON.stringify(value)}\n`)
   }
   const error = (id: RpcId | null, code: number, message: string) => send({ jsonrpc: "2.0", id, error: { code, message } })
-  const result = (id: RpcId, value: unknown) => send({ jsonrpc: "2.0", id, result: value })
+  const result = (id: RpcId, value: unknown) => {
+    const response = { jsonrpc: "2.0", id, result: value }
+    const pending = active.get(id)
+    if (pending) control?.event("response", id, pending, response)
+    send(response)
+  }
   const close = async () => {
     if (closing) return
     closing = true
+    control?.retire()
     for (const pending of active.values()) pending.controller.abort()
     // Synchronous supervised commands cancel through the unchanged adapter. Async
     // headless dispatches have no owner lease and survive the normal turn exit.
@@ -122,6 +137,7 @@ export async function serve() {
       Promise.allSettled([...active.values()].map((value) => value.promise)),
       Bun.sleep(1500),
     ])
+    control?.close()
     process.exit(0)
   }
   process.once("SIGTERM", close)
@@ -136,12 +152,12 @@ export async function serve() {
       error(null, -32600, "Invalid JSON-RPC request"); continue
     }
     if (message.method === "notifications/cancelled") {
-      active.get(message.params?.requestId)?.controller.abort()
+      abort(message.params?.requestId)
       continue
     }
     if (message.id === undefined) continue
     const id = message.id
-    if (typeof id !== "string" && typeof id !== "number") { error(null, -32600, "Invalid request ID"); continue }
+    if (typeof id !== "string" && (typeof id !== "number" || (control && !Number.isSafeInteger(id)))) { error(null, -32600, "Invalid request ID"); continue }
     if (active.has(id)) { error(id, -32600, "Request ID is already active"); continue }
     switch (message.method) {
       case "initialize":
@@ -152,11 +168,21 @@ export async function serve() {
       case "tools/call": {
         if (message.params?.name !== "bash") { error(id, -32602, "Unknown tool"); break }
         const controller = new AbortController()
-        const promise = callBash(message.params.arguments, controller.signal, message.params._meta).then(
+        // Publish before any await or Bash dispatch; never address a reused ID
+        // without its fresh request generation on the external control plane.
+        const pending: Pending = { controller, generation: control ? secret() : "", promise: Promise.resolve(), request: control ? message : undefined }
+        pending.promise = Promise.resolve().then(() => callBash(message.params.arguments, controller.signal, message.params._meta, (session) => {
+          pending.session = session
+          control?.event("session", id, pending)
+        })).then(
           (text) => result(id, { content: [{ type: "text", text }] }),
           (failure) => result(id, { content: [{ type: "text", text: String(failure instanceof Error ? failure.message : failure) }], isError: true }),
-        ).finally(() => active.delete(id))
-        active.set(id, { controller, promise })
+        ).finally(() => {
+          active.delete(id)
+          control?.event("retired", id, pending)
+        })
+        active.set(id, pending)
+        control?.event("request", id, pending, message)
         break
       }
       case "resources/list": result(id, { resources: [] }); break
@@ -167,4 +193,7 @@ export async function serve() {
   }
 }
 
-if (import.meta.main) await serve()
+if (import.meta.main) {
+  try { await serve() }
+  catch { console.error("Codex MCP bridge startup failed"); process.exit(1) }
+}

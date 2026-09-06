@@ -114,6 +114,13 @@ fn isolated_home(account_home: &std::path::Path) -> Result<PathBuf, ProviderFail
 }
 
 fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
+    if std::env::var_os(crate::request_control::DIRECTORY_ENV).is_some()
+        || std::env::var_os(crate::request_control::BINDING_ENV).is_some()
+    {
+        return Err(invalid(
+            "Request control is supported only for disposable exec stdio launches",
+        ));
+    }
     let options = parse(args).map_err(invalid)?;
     let settings_id = options.settings_id.as_deref().unwrap();
     let label = match (&options.model, &options.native_model, &options.native_effort) {
