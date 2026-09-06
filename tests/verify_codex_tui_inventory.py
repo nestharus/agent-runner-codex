@@ -23,7 +23,7 @@ import time
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('target/debug/agent-runner-codex'))
-    parser.add_argument('--label', default='gpt-luna-low', choices=[prefix+e for prefix in ['gpt-', 'codex-gpt-', 'gpt-luna-', 'gpt-terra-'] for e in ['low','medium','high','xhigh','max']])
+    parser.add_argument('--label', default='gpt-luna-low', choices=[prefix+e for prefix in ['gpt-', 'codex-gpt-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']])
     parser.add_argument('--output-dir', type=Path)
     args = parser.parse_args()
     args.binary = args.binary.resolve()
@@ -117,7 +117,8 @@ def main():
         assert len(captured)==2, f'Expected native Bash call + response, received {len(captured)} requests; artifacts: {root}'
         body=captured[0]
         model=('gpt-5.6-luna' if args.label.startswith('gpt-luna-')
-               else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-') else 'gpt-6-astra')
+               else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
+               else 'gpt-5.6-sol' if args.label.startswith('gpt-sol-') else 'gpt-6-astra')
         assert body['model']==model
         assert body['reasoning']['effort']==args.label.rsplit('-',1)[1]
         tools=list(body.get('tools',[]))

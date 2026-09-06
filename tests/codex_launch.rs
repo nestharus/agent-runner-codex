@@ -106,8 +106,12 @@ fn standard_labels_launch_the_same_astra_configuration_as_temporary_aliases() {
 }
 
 #[test]
-fn luna_and_terra_labels_pass_policy_and_launch_with_managed_tools_in_every_account() {
-    for (family, model) in [("luna", "gpt-5.6-luna"), ("terra", "gpt-5.6-terra")] {
+fn luna_terra_and_sol_labels_pass_policy_and_launch_with_managed_tools_in_every_account() {
+    for (family, model) in [
+        ("luna", "gpt-5.6-luna"),
+        ("terra", "gpt-5.6-terra"),
+        ("sol", "gpt-5.6-sol"),
+    ] {
         for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
                 let f = Fixture::new();
@@ -235,8 +239,12 @@ fn policy_rejects_route_overrides_before_spawn() {
 }
 
 #[test]
-fn luna_and_terra_reject_ultra_and_cross_model_or_effort_arguments() {
-    for (family, model) in [("luna", "gpt-5.6-luna"), ("terra", "gpt-5.6-terra")] {
+fn luna_terra_and_sol_reject_ultra_and_cross_model_or_effort_arguments() {
+    for (family, model) in [
+        ("luna", "gpt-5.6-luna"),
+        ("terra", "gpt-5.6-terra"),
+        ("sol", "gpt-5.6-sol"),
+    ] {
         for (label_effort, argument_model, argument_effort, expected) in [
             ("ultra", model, "ultra", "unknown_model"),
             ("high", "gpt-6-astra", "high", "model_args_mismatch"),
@@ -664,7 +672,12 @@ fn sigterm_cancels_cli_and_reaps_native_process_group() {
 
 #[test]
 fn model_catalog_cannot_reenable_native_tools() {
-    for slug in ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra"] {
+    for slug in [
+        "gpt-6-astra",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+    ] {
         let f = Fixture::new();
         let path = f.root.path().join("models.json");
         let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -686,27 +699,34 @@ fn model_catalog_cannot_reenable_native_tools() {
 }
 
 #[test]
-fn missing_or_duplicate_terra_metadata_rejects_launch_before_spawn() {
-    for duplicate in [false, true] {
-        let f = Fixture::new();
-        let path = f.root.path().join("models.json");
-        let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        let entries = catalog["models"].as_array_mut().unwrap();
-        if duplicate {
-            entries.push(
-                entries
-                    .iter()
-                    .find(|entry| entry["slug"] == "gpt-5.6-terra")
-                    .unwrap()
-                    .clone(),
-            );
-        } else {
-            entries.retain(|entry| entry["slug"] != "gpt-5.6-terra");
+fn missing_or_duplicate_model_metadata_rejects_launch_before_spawn() {
+    for slug in [
+        "gpt-6-astra",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+    ] {
+        for duplicate in [false, true] {
+            let f = Fixture::new();
+            let path = f.root.path().join("models.json");
+            let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let entries = catalog["models"].as_array_mut().unwrap();
+            if duplicate {
+                entries.push(
+                    entries
+                        .iter()
+                        .find(|entry| entry["slug"] == slug)
+                        .unwrap()
+                        .clone(),
+                );
+            } else {
+                entries.retain(|entry| entry["slug"] != slug);
+            }
+            fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+            let result = f.invoke("launch", &f.request);
+            assert_eq!(result.1[0]["error"]["code"], "model_catalog_invalid");
+            assert!(!f.root.path().join("calls.jsonl").exists());
         }
-        fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
-        let result = f.invoke("launch", &f.request);
-        assert_eq!(result.1[0]["error"]["code"], "model_catalog_invalid");
-        assert!(!f.root.path().join("calls.jsonl").exists());
     }
 }
 

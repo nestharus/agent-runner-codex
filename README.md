@@ -16,9 +16,9 @@ Codex-specific launch and rollout handling replace OpenCode's native boundaries.
 `codex-gpt-*` names remain equivalent aliases. Native sub-agent delegation
 remains disabled for every label.
 
-`gpt-luna-{low,medium,high,xhigh,max}` and
-`gpt-terra-{low,medium,high,xhigh,max}` use the same Codex adapter and five-account
-pool with `gpt-5.6-luna` and `gpt-5.6-terra`, respectively. Each label selects its
+`gpt-luna-{low,medium,high,xhigh,max}`, `gpt-terra-{low,medium,high,xhigh,max}`,
+and `gpt-sol-{low,medium,high,xhigh,max}` use the same Codex adapter and five-account
+pool with `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`, respectively. Each label selects its
 corresponding native reasoning effort. No family registers `ultra`.
 
 Quota probing uses the installed `~/.local/bin/chatgpt-usage` adapter against
@@ -176,6 +176,13 @@ To register the equivalent Terra family:
 ```sh
 python3 scripts/install-labels.py --terra-labels --stage-root /tmp/agent-runner-terra-labels
 python3 scripts/install-labels.py --terra-labels --stage-root /tmp/agent-runner-terra-labels --apply
+```
+
+To register the equivalent Sol family:
+
+```sh
+python3 scripts/install-labels.py --sol-labels --stage-root /tmp/agent-runner-sol-labels
+python3 scripts/install-labels.py --sol-labels --stage-root /tmp/agent-runner-sol-labels --apply
 ```
 
 Each mode backs up existing routes in its selected family and creates missing

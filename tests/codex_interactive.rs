@@ -75,8 +75,12 @@ with open(os.environ['CALLS'],'w') as f:
 }
 
 #[test]
-fn luna_and_terra_interactive_routes_preserve_every_effort_and_account() {
-    for (family, model) in [("luna", "gpt-5.6-luna"), ("terra", "gpt-5.6-terra")] {
+fn luna_terra_and_sol_interactive_routes_preserve_every_effort_and_account() {
+    for (family, model) in [
+        ("luna", "gpt-5.6-luna"),
+        ("terra", "gpt-5.6-terra"),
+        ("sol", "gpt-5.6-sol"),
+    ] {
         for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
                 let f = Fixture::new();
@@ -263,6 +267,7 @@ fn tui_rejects_overrides_missing_dependencies_and_wrong_account_resume() {
         vec!["--remote", "ws://example"],
         vec!["--model", "gpt-luna-ultra"],
         vec!["--model", "gpt-terra-ultra"],
+        vec!["--model", "gpt-sol-ultra"],
         vec![
             "-m",
             "gpt-5.6-terra",

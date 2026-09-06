@@ -104,8 +104,19 @@ python3 scripts/install-labels.py --terra-labels --stage-root /tmp/codex-terra-l
 ```
 
 Terra uses the same account pool and saves replaced routes under
-`backups/codex-terra-*/models/`. Neither family includes `ultra`.
-`--luna-labels`, `--terra-labels`, and `--standard-labels` are mutually exclusive;
+`backups/codex-terra-*/models/`.
+
+To register `gpt-sol-low`, `gpt-sol-medium`, `gpt-sol-high`, `gpt-sol-xhigh`,
+and `gpt-sol-max` with `gpt-5.6-sol`:
+
+```bash
+python3 scripts/install-labels.py --sol-labels --stage-root /tmp/codex-sol-labels
+python3 scripts/install-labels.py --sol-labels --stage-root /tmp/codex-sol-labels --apply
+```
+
+Sol uses the same account pool and saves replaced routes under
+`backups/codex-sol-*/models/`. No family includes `ultra`.
+`--luna-labels`, `--terra-labels`, `--sol-labels`, and `--standard-labels` are mutually exclusive;
 apply the desired families separately after installing the updated provider and
 managed catalog. Each mode requires every selected route to be advertised before
 it changes any installed configuration, and preserves unrelated labels and the

@@ -16,7 +16,7 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
     );
     let response: Value = serde_json::from_slice(&output).unwrap();
     let entries = response["result"]["models"].as_array().unwrap();
-    assert_eq!(entries.len(), 20);
+    assert_eq!(entries.len(), 25);
     let metadata: Value =
         serde_json::from_str(include_str!("../integrations/codex/models.json")).unwrap();
     for (prefix, model) in [
@@ -24,6 +24,7 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
         ("codex-gpt-", "gpt-6-astra"),
         ("gpt-luna-", "gpt-5.6-luna"),
         ("gpt-terra-", "gpt-5.6-terra"),
+        ("gpt-sol-", "gpt-5.6-sol"),
     ] {
         let native = metadata["models"]
             .as_array()

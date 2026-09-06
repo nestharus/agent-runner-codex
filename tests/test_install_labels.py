@@ -53,6 +53,11 @@ class LabelInstallerTests(unittest.TestCase):
             (self.models / f'gpt-terra-{effort}.toml').write_text('# previous OpenCode route\n')
         self.assert_family_apply('terra')
 
+    def test_sol_apply_preserves_other_labels_and_backs_up_replaced_routes(self):
+        for effort in ['low', 'max']:
+            (self.models / f'gpt-sol-{effort}.toml').write_text('# previous OpenCode route\n')
+        self.assert_family_apply('sol')
+
     def assert_family_apply(self, family):
         untouched = {path.name: path.read_text() for path in self.models.glob('*.toml')
                      if not path.name.startswith(f'gpt-{family}-')}
@@ -93,6 +98,9 @@ class LabelInstallerTests(unittest.TestCase):
 
     def test_missing_terra_route_rejects_apply_without_mutation(self):
         self.assert_missing_route('terra', 'high')
+
+    def test_missing_sol_route_rejects_apply_without_mutation(self):
+        self.assert_missing_route('sol', 'xhigh')
 
     def assert_missing_route(self, family, effort):
         before = {path.name: path.read_text() for path in self.models.glob('*.toml')}

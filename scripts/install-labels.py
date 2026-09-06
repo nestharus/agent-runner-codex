@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage or apply Codex routes for Astra, Luna, or Terra labels."""
+"""Stage or apply Codex routes for Astra, Luna, Terra, or Sol labels."""
 
 import argparse
 from datetime import datetime, timezone
@@ -168,6 +168,7 @@ def main():
     selection.add_argument("--standard-labels", action="store_true", help="Promote gpt-low/medium/high/xhigh/max to Codex Astra, backing up and replacing existing labels")
     selection.add_argument("--luna-labels", action="store_true", help="Register gpt-luna-low/medium/high/xhigh/max with Codex Luna, backing up and replacing existing labels")
     selection.add_argument("--terra-labels", action="store_true", help="Register gpt-terra-low/medium/high/xhigh/max with Codex Terra, backing up and replacing existing labels")
+    selection.add_argument("--sol-labels", action="store_true", help="Register gpt-sol-low/medium/high/xhigh/max with Codex Sol, backing up and replacing existing labels")
     parser.add_argument("--apply", action="store_true", help="Install after the Codex provider binary has been validated")
     args = parser.parse_args()
     provider_path = (args.provider_path or args.config_root/"agent-runner-codex/agent-runner-codex").expanduser().absolute()
@@ -182,7 +183,7 @@ def main():
         original.splitlines(keepends=True), proposed.splitlines(keepends=True),
         fromfile=str(providers_file), tofile=str(providers_file),
     )))
-    family = "luna" if args.luna_labels else "terra" if args.terra_labels else "astra"
+    family = "luna" if args.luna_labels else "terra" if args.terra_labels else "sol" if args.sol_labels else "astra"
     prefix = f"gpt-{family}" if family != "astra" else "gpt" if args.standard_labels else "codex-gpt"
     model = f"gpt-5.6-{family}" if family != "astra" else "gpt-6-astra"
     models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path, model) for effort in EFFORTS}
@@ -206,7 +207,7 @@ def main():
             raise SystemExit(f"Codex provider is not installed at {provider_path}")
         for name, text in models.items():
             destination = args.config_root/"models"/name
-            if not (args.standard_labels or args.luna_labels or args.terra_labels) and destination.exists() and destination.read_text() != text:
+            if not (args.standard_labels or args.luna_labels or args.terra_labels or args.sol_labels) and destination.exists() and destination.read_text() != text:
                 raise SystemExit(f"Refusing to replace different existing label {destination}")
         verify_provider_models(provider_path, args.config_root, models)
         verify_interactive_launcher(provider_path)
