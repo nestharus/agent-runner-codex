@@ -9,26 +9,26 @@ required = true
 type = "string"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
+args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
+interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
 name = "codex"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
+args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
+interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
 name = "codex2"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
+args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
+interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
 name = "codex3"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
+args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
+interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
 name = "codex4"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"high\""]
+args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
+interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
 name = "codex5"

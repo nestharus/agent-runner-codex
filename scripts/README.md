@@ -74,14 +74,24 @@ python3 scripts/install-labels.py --standard-labels \
   --stage-root /tmp/codex-standard-labels --apply
 ```
 
-Review `models.patch` before applying. This mode replaces those five existing
-model files and saves their previous contents under `backups/codex-astra-*/models/`
+Review `models.patch` before applying. Standard `gpt-low` stays Astra/low;
+`gpt-medium`, `gpt-high`, `gpt-xhigh`, and `gpt-max` select Astra/medium.
+The managed no-model PTY default remains `gpt-xhigh`, now medium. For actual
+native high/xhigh/max effort, use the preserved `codex-gpt-high`,
+`codex-gpt-xhigh`, or `codex-gpt-max` routes (or an exact native PTY argument pair).
+No new Astra aliases are added.
+
+This mode stages all five model files, but equivalent existing routes retain
+their bytes (including low/medium comments and formatting). Only changed files
+are replaced and their previous contents saved under `backups/codex-astra-*/models/`
 alongside the provider configuration backup. It preserves the temporary
 `codex-gpt-*` aliases, other model labels, and the configured default provider.
 Before any mode applies routing changes, the installed provider must
 advertise every target label with the exact selected model, reasoning arguments,
 and all five eligible accounts. Install the updated provider first when
-promoting the standard labels.
+promoting the standard labels. Stale high/xhigh/max route arguments are rejected
+by strict headless admission; update the source-backed routes with this mode
+rather than adding arbitrary argument overrides.
 
 To register `gpt-luna-low`, `gpt-luna-medium`, `gpt-luna-high`, `gpt-luna-xhigh`,
 and `gpt-luna-max` with Codex:
@@ -168,3 +178,20 @@ environment; those identities cannot be reused in the isolated runner.
 The files under `examples/` use a `binary` reference resolved through `PATH`;
 the installer generates absolute `path` references to the selected installed
 provider. No credentials are copied or created by this script.
+
+## Offline verification evidence
+
+`tests/verify_codex_inventory.py --binary /exact/provider --label gpt-high`
+checks the managed headless native request against a loopback Responses server.
+Repeat with `gpt-xhigh`, `gpt-max` (medium), and `codex-gpt-xhigh` (native xhigh).
+Use `--output-dir /new/evidence/path` to retain isolated configs, request/response
+bodies and raw provider results. `tests/verify_codex_tui_inventory.py --binary
+/exact/provider --no-model --output-dir /tmp/short-new-path` checks the actual
+no-model PTY at medium, including managed tools and native session binding;
+use a short path for its Unix socket. These checks spend no model tokens and
+use new test homes, not native credentials. They do not prove service availability.
+
+Set `CODEX_TEST_EVIDENCE_DIR` to a fresh absolute directory to retain fake launch
+and interactive fixture configs/native argv plus installer fixtures/backups.
+The fake Rust fixtures retain only their named configuration and call files,
+not the large lifecycle journals; complete runner output is captured separately.

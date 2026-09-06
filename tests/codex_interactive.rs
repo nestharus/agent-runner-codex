@@ -1,3 +1,4 @@
+mod support;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -8,6 +9,11 @@ use std::{
 
 struct Fixture {
     root: tempfile::TempDir,
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        support::preserve_fixture(self.root.path());
+    }
 }
 impl Fixture {
     fn new() -> Self {
@@ -193,7 +199,7 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
 #[test]
 fn default_and_exact_legacy_model_routes_are_managed() {
     for (args, model, effort) in [
-        (vec![], "gpt-6-astra", "xhigh"),
+        (vec![], "gpt-6-astra", "medium"),
         (
             vec!["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"max\""],
             "gpt-5.6-luna",
@@ -207,6 +213,62 @@ fn default_and_exact_legacy_model_routes_are_managed() {
         assert!(argv.contains(&json!(model)));
         assert!(argv.contains(&json!(format!("model_reasoning_effort=\"{effort}\""))));
     }
+}
+
+#[test]
+fn astra_interactive_labels_and_explicit_native_efforts_remain_distinct() {
+    for (label, effort) in [
+        ("gpt-low", "low"),
+        ("gpt-medium", "medium"),
+        ("gpt-high", "medium"),
+        ("gpt-xhigh", "medium"),
+        ("gpt-max", "medium"),
+        ("codex-gpt-low", "low"),
+        ("codex-gpt-medium", "medium"),
+        ("codex-gpt-high", "high"),
+        ("codex-gpt-xhigh", "xhigh"),
+        ("codex-gpt-max", "max"),
+    ] {
+        assert_astra_interactive(&["--model", label], effort);
+    }
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        assert_astra_interactive(
+            &[
+                "-m",
+                "gpt-6-astra",
+                "-c",
+                &format!("model_reasoning_effort=\"{effort}\""),
+            ],
+            effort,
+        );
+    }
+}
+
+fn assert_astra_interactive(args: &[&str], effort: &str) {
+    let f = Fixture::new();
+    let result = f.command().args(args).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let call = f.call();
+    let argv = call["argv"].as_array().unwrap();
+    assert!(argv
+        .windows(2)
+        .any(|pair| pair == [json!("-m"), json!("gpt-6-astra")]));
+    let native_efforts: Vec<_> = argv
+        .iter()
+        .filter(|arg| {
+            arg.as_str()
+                .is_some_and(|s| s.starts_with("model_reasoning_effort="))
+        })
+        .collect();
+    assert_eq!(
+        native_efforts,
+        [&json!(format!("model_reasoning_effort=\"{effort}\""))],
+        "{args:?}"
+    );
 }
 
 #[test]

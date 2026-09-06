@@ -103,6 +103,8 @@ def update_providers(original, provider_path, config_root):
 
 
 def atomic_write(path, text):
+    if path.exists() and path.read_bytes() == text.encode():
+        return
     pending = path.with_name(path.name + ".codex-migration-pending")
     pending.write_text(text)
     pending.replace(path)
@@ -159,6 +161,22 @@ def verify_interactive_launcher(provider_path):
         raise SystemExit("Managed Codex PTY launcher is unavailable; install the current provider first")
 
 
+def staged_model_text(existing, proposed):
+    """Retain equivalent installed route bytes, including comments/newlines."""
+    if not existing.exists():
+        return proposed
+    original = existing.read_bytes().decode("utf-8")
+    if tomllib.loads(original) == tomllib.loads(proposed):
+        return original
+    return proposed
+
+
+def selected_effort(effort, standard_labels):
+    if standard_labels and effort in ("high", "xhigh", "max"):
+        return "medium"
+    return effort
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-root", type=Path, default=Path.home()/".config/oulipoly-agent-runner")
@@ -186,7 +204,9 @@ def main():
     family = "luna" if args.luna_labels else "terra" if args.terra_labels else "sol" if args.sol_labels else "astra"
     prefix = f"gpt-{family}" if family != "astra" else "gpt" if args.standard_labels else "codex-gpt"
     model = f"gpt-5.6-{family}" if family != "astra" else "gpt-6-astra"
-    models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path, model) for effort in EFFORTS}
+    models = {f"{prefix}-{effort}.toml":model_text(selected_effort(effort, args.standard_labels), provider_path, model) for effort in EFFORTS}
+    models = {name: staged_model_text(args.config_root/"models"/name, text)
+              for name, text in models.items()}
     model_diffs = []
     for name, text in models.items():
         parsed = tomllib.loads(text)
@@ -216,9 +236,9 @@ def main():
         backup.mkdir(parents=True)
         shutil.copy2(providers_file, backup/"providers.toml")
         (backup/"models").mkdir()
-        for name in models:
+        for name, text in models.items():
             existing = args.config_root/"models"/name
-            if existing.exists():
+            if existing.exists() and existing.read_bytes() != text.encode():
                 shutil.copy2(existing, backup/"models"/name)
         atomic_write(providers_file, proposed)
         for name, text in models.items():

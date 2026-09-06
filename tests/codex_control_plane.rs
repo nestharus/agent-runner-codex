@@ -40,6 +40,11 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
             .collect();
         assert_eq!(levels, ["low", "medium", "high", "xhigh", "max"]);
         for effort in levels {
+            let native_effort = if prefix == "gpt-" && matches!(effort, "high" | "xhigh" | "max") {
+                "medium"
+            } else {
+                effort
+            };
             let name = format!("{prefix}{effort}");
             let matches: Vec<_> = entries
                 .iter()
@@ -53,7 +58,7 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
                     "-m",
                     model,
                     "-c",
-                    format!("model_reasoning_effort=\"{effort}\"")
+                    format!("model_reasoning_effort=\"{native_effort}\"")
                 ])
             );
             assert_eq!(
