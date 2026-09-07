@@ -232,3 +232,63 @@ requires arguments matching the selected label; migrate stale standard aliases
 with `--standard-labels` after installing the updated provider. Installing an
 updated provider and routing affects new PTY launches; an already-running Codex
 session keeps the tool inventory with which it started.
+
+### Bounded JSONL record continuation (AGE-343)
+
+Session-turn paging keeps the caller's existing source/response/inline/turn
+budgets, including for old `codex-stp1-` continuations. It can stage a partial
+record across source quanta rather than requiring a whole record to fit the
+remaining quantum. No record is skipped based on an unparsed type prefix.
+Projection, turn IDs (original record byte offsets), sequence and body digests
+are computed only after a complete JSONL record is parsed. Oversized projected
+bodies retain the existing `omitted_oversize` metadata/digest contract.
+
+Resource envelope:
+
+- Native source reads, including identity metadata, stay within the requested
+  source quota (at most 8 MiB; Runner currently supplies 1 MiB). Identity scanning
+  uses a one-byte buffer to avoid uncharged read-ahead: at most the source quota
+  in header-read calls. This deliberately trades header syscall overhead for
+  exact accounting. Native record reads remain chunked.
+- A newline-complete record may contain at most 8,388,608 bytes. A prefix without
+  a newline at that ceiling returns `session_turn_record_ceiling_exceeded`,
+  never completion or a silent skip. Metadata that cannot leave any work budget
+  and insufficient response metadata capacity use
+  `session_turn_page_budget_too_small`. Hosts must stop unchanged-input retries
+  for these deterministic limits; raising budgets invalidates old page tokens.
+- Framing assembles at most 8 MiB of record/page bytes per call. Immutable staging
+  reads are separate from **native** source accounting: at most one prefix
+  below 8 MiB, plus at most one same-sized collision-validation read; cursor
+  reads are limited to 32 KiB. Prefix staging writes less than 8 MiB per call.
+  Buffer allocation capacity may exceed logical byte length; JSON/projection
+  allocations are additionally proportional to this bounded record. This is
+  not a measured or allocator-enforced whole-process RSS cap.
+- At most 256 turns, 524,288 response bytes and 65,536 inline body bytes remain
+  supported; JSON parsing retains serde_json's depth limit. Work is bounded by
+  these limits and the existing directory discovery limits (100,000 rollouts,
+  400,000 entries), not the entire transcript length. Staging can reread/hash a
+  prefix on each quantum; total catch-up work is not claimed to be single-pass.
+
+Staging lives beside private provider-owned paging cursors as immutable,
+content-addressed `record-<sha256>.part` files, published and synchronized before
+any referring cursor. Tokens bind the staging digest, record start, account,
+provider, settings, session, projection, nonce, budgets and existing file
+identity checks. Interrupted calls may leave unreferenced staging files; do not
+manually remove staging while a retained cursor may reference it. There is no
+new automatic garbage collection or disk-retention bound.
+
+At incomplete EOF, snapshot completion means all currently frozen bytes were
+examined, **not** that the partial record was projected or that the live session
+has stopped. The resume token retains that prefix; append supplies its suffix.
+Neither this result nor `last_success_at` proves current native/model-context
+coverage. Existing inode/truncation/mtime checks remain in force; same-inode
+rewrites combined with file growth are not newly content-attested.
+
+Upgrade accepts legacy cursors without staging fields. Downgrade compatibility
+is not symmetric: an older provider rejects new cursors that contain a staged
+prefix. A binary-only rollback after checkpoint advancement is therefore unsafe;
+retain the compatible reader and its provider-state with the checkpoint, or
+obtain a separately reviewed rollback/reconciliation plan. Never reset a native
+session, rewrite native records, or manually advance a production cursor to
+bypass this boundary. Canonical catch-up does not reconstruct native model
+context or settle a native UI/history complaint.

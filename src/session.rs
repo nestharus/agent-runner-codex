@@ -335,7 +335,11 @@ pub(crate) fn locate_page_source(
                 "Source budget cannot admit rollout identity metadata",
             ));
         }
-        let mut reader = BufReader::new(
+        // Identity discovery must not prefetch uncharged native bytes. A
+        // one-byte buffer trades header syscalls for exact source accounting;
+        // the loop remains bounded by this request's remaining source quota.
+        let mut reader = BufReader::with_capacity(
+            1,
             File::open(path)
                 .map_err(|_| io_failure(request))?
                 .take(remaining as u64),

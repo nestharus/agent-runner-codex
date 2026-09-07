@@ -4,12 +4,22 @@ use crate::envelope::{success_response, ProviderFailure, RequestEnvelope};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const PROTOCOL: &str = "oulipoly.session_turn_pages/v1";
 const PREFIX: &str = "codex-stp1-";
+// Independent of the native-source quantum: at most one bounded record is
+// staged between requests. Never skip a record based on its unparsed prefix.
+const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PartialRecord {
+    start: u64,
+    sha256: String,
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +76,9 @@ struct Cursor {
     offset: u64,
     page: u64,
     sequence: u64,
+    // Absent on all legacy cursors; preserve their byte serialization/tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    partial_record: Option<PartialRecord>,
 }
 
 fn invalid(request: &RequestEnvelope, message: &str) -> ProviderFailure {
@@ -262,7 +275,9 @@ fn persist(root: &Path, cursor: &Cursor, request: &RequestEnvelope) -> Result<()
     let bytes = serde_json::to_vec(cursor).unwrap();
     let path = root.join(format!("{}.json", sha256_hex(&bytes)));
     if path.exists() {
-        if fs::read(path).map_err(|_| io_error(request))? == bytes {
+        if crate::durable_fs::read_file_bounded(&path, 32768).map_err(|_| io_error(request))?
+            == bytes
+        {
             return Ok(());
         }
         return Err(stale(request));
@@ -278,6 +293,80 @@ fn persist(root: &Path, cursor: &Cursor, request: &RequestEnvelope) -> Result<()
     File::open(root)
         .and_then(|f| f.sync_all())
         .map_err(|_| io_error(request))
+}
+
+fn record_limit(request: &RequestEnvelope) -> ProviderFailure {
+    ProviderFailure::unsupported(
+        &request.request_id,
+        "session_turn_record_ceiling_exceeded",
+        "JSONL record exceeds the supported 8388608-byte framing ceiling; checkpoint retained",
+    )
+}
+
+fn partial_bytes(
+    root: &Path,
+    state: &Cursor,
+    request: &RequestEnvelope,
+) -> Result<Vec<u8>, ProviderFailure> {
+    let Some(partial) = &state.partial_record else {
+        return Ok(Vec::new());
+    };
+    let len = state
+        .offset
+        .checked_sub(partial.start)
+        .ok_or_else(|| stale(request))?;
+    if len == 0
+        || len >= MAX_RECORD_BYTES as u64
+        || partial.sha256.len() != 64
+        || !partial
+            .sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(stale(request));
+    }
+    let bytes = crate::durable_fs::read_file_bounded(
+        &root.join(format!("record-{}.part", partial.sha256)),
+        len as usize,
+    )
+    .map_err(|_| stale(request))?;
+    if bytes.len() as u64 != len || sha256_hex(&bytes) != partial.sha256 || bytes.contains(&b'\n') {
+        return Err(stale(request));
+    }
+    Ok(bytes)
+}
+
+fn stage_partial(
+    root: &Path,
+    start: u64,
+    bytes: &[u8],
+    request: &RequestEnvelope,
+) -> Result<PartialRecord, ProviderFailure> {
+    if bytes.len() >= MAX_RECORD_BYTES {
+        return Err(record_limit(request));
+    }
+    let sha256 = sha256_hex(bytes);
+    let path = root.join(format!("record-{sha256}.part"));
+    // Immutable content-addressed private staging. Publish before its cursor so
+    // interruption cannot expose a cursor whose bytes were not synchronized.
+    let mut temp = tempfile::NamedTempFile::new_in(root).map_err(|_| io_error(request))?;
+    temp.write_all(bytes).map_err(|_| io_error(request))?;
+    temp.as_file().sync_all().map_err(|_| io_error(request))?;
+    match temp.persist_noclobber(&path) {
+        Ok(_) => (),
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = crate::durable_fs::read_file_bounded(&path, bytes.len())
+                .map_err(|_| stale(request))?;
+            if existing != bytes {
+                return Err(stale(request));
+            }
+        }
+        Err(_) => return Err(io_error(request)),
+    }
+    File::open(root)
+        .and_then(|f| f.sync_all())
+        .map_err(|_| io_error(request))?;
+    Ok(PartialRecord { start, sha256 })
 }
 
 #[derive(Serialize)]
@@ -453,6 +542,7 @@ pub(crate) fn read_turns(request: &RequestEnvelope) -> Result<Value, ProviderFai
             offset,
             page: 0,
             sequence: 0,
+            partial_record: old.and_then(|s| s.partial_record),
         }
     };
     let mut next = state.clone();
@@ -488,18 +578,23 @@ pub(crate) fn read_turns(request: &RequestEnvelope) -> Result<Value, ProviderFai
             .map_err(|_| io_error(request))?;
         let maximum =
             (state.stamp.len - state.offset).min((p.max_source_bytes - metadata_bytes) as u64);
-        let mut bytes = Vec::new();
+        let mut bytes = partial_bytes(&root, &state, request)?;
+        let prefix_len = bytes.len();
+        let record_start = state.offset - prefix_len as u64;
+        // Native reads retain the old budget, including identity metadata.
+        // Staging reads are separately bounded by MAX_RECORD_BYTES.
         (&mut file)
-            .take(maximum)
+            .take(maximum.min((MAX_RECORD_BYTES - prefix_len) as u64))
             .read_to_end(&mut bytes)
             .map_err(|_| io_error(request))?;
-        examined = metadata_bytes + bytes.len();
+        let native_read = bytes.len() - prefix_len;
+        examined = metadata_bytes + native_read;
         let mut consumed = 0;
         for line in bytes.split_inclusive(|b| *b == b'\n') {
             if !line.ends_with(b"\n") {
                 break;
             }
-            let offset = state.offset + consumed as u64;
+            let offset = record_start + consumed as u64;
             let proposed_offset = offset + line.len() as u64;
             let value = if line.iter().all(u8::is_ascii_whitespace) {
                 Value::Null
@@ -525,6 +620,7 @@ pub(crate) fn read_turns(request: &RequestEnvelope) -> Result<Value, ProviderFai
                 }
                 let mut candidate = next.clone();
                 candidate.offset = proposed_offset;
+                candidate.partial_record = None;
                 turns.push(turn.clone());
                 let (result, _) = page_result(
                     &state,
@@ -560,16 +656,25 @@ pub(crate) fn read_turns(request: &RequestEnvelope) -> Result<Value, ProviderFai
             }
             consumed += line.len();
             next.offset = proposed_offset;
+            next.partial_record = None;
         }
         if next.offset == state.stamp.len {
             complete = true;
         }
-        // An incomplete final native record is deferred to the next snapshot.
-        if state.offset + bytes.len() as u64 == state.stamp.len
-            && consumed < bytes.len()
-            && !bytes[consumed..].contains(&b'\n')
-        {
-            complete = true;
+        // Only an unframed suffix can be staged. If a turn/response limit
+        // stopped us before a newline, leave that entire record for replay.
+        if consumed < bytes.len() && !bytes[consumed..].contains(&b'\n') {
+            let suffix = &bytes[consumed..];
+            next.partial_record = Some(stage_partial(
+                &root,
+                record_start + consumed as u64,
+                suffix,
+                request,
+            )?);
+            next.offset = record_start + bytes.len() as u64;
+            // EOF coverage does not project an unfinished record. Resume keeps
+            // its immutable prefix, and append supplies the missing suffix.
+            complete = next.offset == state.stamp.len;
         }
         if next.offset == state.offset && !complete {
             return Err(capacity(
