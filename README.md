@@ -292,3 +292,47 @@ obtain a separately reviewed rollback/reconciliation plan. Never reset a native
 session, rewrite native records, or manually advance a production cursor to
 bypass this boundary. Canonical catch-up does not reconstruct native model
 context or settle a native UI/history complaint.
+
+### AGE-343 paging-state admission and containment
+
+The canonical `host.data_root/provider-state/codex/session-pages-v1` scope
+(or the existing default data root) admits at most **536,870,912 logical file
+bytes and 4,096 file objects**, including cursor JSON, immutable record prefixes,
+and all temporary/orphan files. This is a paging-scope limit, not a bound on the
+whole provider, filesystem block allocation, directory metadata, or process RSS.
+A directory-inode advisory lock serializes forward paging requests across threads,
+processes and path aliases. All writers must use this compatible implementation;
+concurrent older/noncooperating writers are not supported. Do not remove/replace
+the locked scope while serving requests. No native-history lock or mutation is
+introduced.
+
+Under the lock, each new write reserves its exact payload bytes and one object
+against retained files before creating its temporary. Atomic rename preserves
+that single-object reservation during publication. Prefix and cursor publication
+remain separately synchronized in that order. Recovery rescans actual files:
+interrupted partial temporaries and published orphans remain charged, not deleted.
+A process that exits releases its pending reservation; any surviving bytes are
+charged by the next writer. The scan uses constant accumulation memory and stops
+at the first over-limit entry (at most 4,097 entries in the production envelope).
+Unexpected non-file entries fail closed. There is no retention GC, token expiry,
+replay eviction, or new native integrity claim.
+
+Exact byte-validated existing content is reused before reservation, including
+when retained state exceeds limits. Existing above-limit state is preserved; no
+new file allocation is admitted. Failure to admit either a prefix or cursor
+returns fixed `session_turn_staging_capacity_exceeded`, never a completed page.
+An admitted prefix followed by a failed cursor write can remain as a charged
+orphan. Old opaque checkpoints and all previously issued replay dependencies
+remain intact. Actual filesystem I/O failures remain distinct from quota refusal.
+Per-record/source/response limits described above are unchanged.
+
+A separate ticket-prefixed containment commit changes only the compile-time
+paging switch. It returns `session_turn_paging_paused` before any paging read,
+state-directory preparation, staging or cursor mutation. It pauses canonical and
+user-observation **v1 paging**; legacy non-paging reads and unrelated provider
+operations remain unchanged. It is not an old-parser downgrade or full ingestion
+restoration. Forward restoration uses the same state and checkpoint. Matching
+Runner code keeps fixed capacity/pause terminals stopped across routine
+re-enqueue/import; a separately authorized caller must explicitly rearm the exact
+terminal/generation after resolving its cause. Neither code nor tests authorize
+installation, rearming production state, or containment activation.
