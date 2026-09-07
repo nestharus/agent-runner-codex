@@ -275,7 +275,9 @@ any referring cursor. Tokens bind the staging digest, record start, account,
 provider, settings, session, projection, nonce, budgets and existing file
 identity checks. Interrupted calls may leave unreferenced staging files; do not
 manually remove staging while a retained cursor may reference it. There is no
-new automatic garbage collection or disk-retention bound.
+new automatic garbage collection or replay eviction. New allocations are bounded
+by the paging-state admission limits below; already-retained content, including
+content above those limits, is preserved and charged to admission.
 
 At incomplete EOF, snapshot completion means all currently frozen bytes were
 examined, **not** that the partial record was projected or that the live session
