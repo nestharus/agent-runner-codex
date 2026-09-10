@@ -426,10 +426,22 @@ not single-pass or linear in transcript length.
 Authentication uses HMAC-SHA256 and one fixed 32-byte random key at the private
 sibling `provider-state/codex/observation-auth-v1/key`. It is outside the
 canonical admission scope, not an observation cache or a growing storage pool.
-Key initialization is directory-lock serialized and synchronized, with no
-per-request temporary files. An interrupted short key is an explicit I/O error,
-not implicit key rotation. Preserve this key with provider state; a missing key
-for an existing observation token fails stale. No expiry, eviction or automatic
+Key initialization holds the directory-inode lock, writes and syncs one private
+`key.preparing` slot, then atomically renames it to `key`. Only bounded, private
+regular preparation residue (at most 32 bytes) is discarded on a fresh start
+with no final key; even a complete pre-rename candidate has issued no tokens.
+No directory scanning or per-page temporary files are introduced. A published
+key is never replaced, and file plus directory sync must succeed before tokens
+can be returned, including on retry after rename. A malformed/unsafe published
+key fails with an explicit diagnostic, not implicit rotation: it may be damaged
+issued authority. Unexpected preparation residue is refused, not broadly cleaned.
+Old initializers use the same lock but can still strand a short final key if
+interrupted before all routes drain/cut over; this correction does not repair
+that ambiguous state or guarantee mixed-reader/writer operation. The private
+provider-owned directory lineage and cooperating lock protocol remain required;
+this is not protection against hostile same-user directory replacement. Preserve
+this key with provider state; a missing key for an existing observation token
+fails stale. No expiry, eviction or automatic
 rotation is introduced. This does not guarantee admission on an actually full or
 unwritable filesystem; those failures remain explicit.
 
