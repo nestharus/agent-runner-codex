@@ -1395,24 +1395,103 @@ mod admission_tests {
     }
 
     #[test]
-    fn pack_allocation_boundary_dedup_and_real_exhaustion() {
+    fn pack_allocation_boundary_dedup_and_growth() {
         let root = tempfile::tempdir().unwrap();
         let req = request(root.path());
         let mut guard = StagingAdmission::acquire(root.path(), &req).unwrap();
-        let (first, mut second) = same_bucket_pair();
+        let (first, second) = same_bucket_pair();
         persist(root.path(), &mut guard, (8192, 1), &first, &req).unwrap();
         // Same bucket append within already charged allocation works at object cap.
         persist(root.path(), &mut guard, (8192, 1), &second, &req).unwrap();
         let retained = files(root.path());
         persist(root.path(), &mut guard, (0, 0), &first, &req).unwrap();
         assert_eq!(files(root.path()), retained);
-        second.snapshot = "x".repeat(5000);
-        let err = persist(root.path(), &mut guard, (8192, 1), &second, &req).unwrap_err();
+        let path = pack_path(root.path(), &token(&first)[PREFIX.len()..]);
+        assert_eq!(retained.len(), 1);
+        let before_len = fs::metadata(&path).unwrap().len();
+        assert!(before_len <= 4096);
+        assert_eq!(charged_bytes(before_len), 8192);
+        // Select the bucket AFTER enlarging the serialized cursor: changing any
+        // cursor field changes its digest and can otherwise test a new object.
+        let mut enlarged = second.clone();
+        enlarged.snapshot = "x".repeat(5000);
+        let enlarged = (1..10000)
+            .find_map(|sequence| {
+                enlarged.sequence = sequence;
+                (pack_path(root.path(), &token(&enlarged)[PREFIX.len()..]) == path)
+                    .then(|| enlarged.clone())
+            })
+            .expect("synthetic enlarged same-bucket search exhausted");
+        assert_ne!(token(&enlarged), token(&first));
+        assert_ne!(token(&enlarged), token(&second));
+        assert_eq!(
+            pack_path(root.path(), &token(&enlarged)[PREFIX.len()..]),
+            path
+        );
+        let frame = format!(
+            "{} {}\n",
+            &token(&enlarged)[PREFIX.len()..],
+            serde_json::to_string(&enlarged).unwrap()
+        );
+        let after_len = before_len + frame.len() as u64;
+        let after_charge = charged_bytes(after_len);
+        assert!(after_len > 4096);
+        assert!(after_charge > 8192);
+        let err = persist(root.path(), &mut guard, (8192, 1), &enlarged, &req).unwrap_err();
+        assert_eq!(err.code, "session_turn_staging_capacity_exceeded");
+        assert!(!err.retryable);
+        assert_eq!(files(root.path()), retained);
+        // Raise only the byte cap: the same existing object must now grow.
+        persist(root.path(), &mut guard, (after_charge, 1), &enlarged, &req).unwrap();
+        assert_eq!(files(root.path()).len(), 1);
+        assert_eq!(fs::metadata(&path).unwrap().len(), after_len);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            [retained[0].1.as_slice(), frame.as_bytes()].concat()
+        );
+        assert_eq!((guard.bytes, guard.objects), (after_charge, 1));
+        for cursor in [&first, &second, &enlarged] {
+            assert_eq!(
+                token(&load(root.path(), &token(cursor), &req).unwrap()),
+                token(cursor)
+            );
+        }
+    }
+
+    #[test]
+    fn new_pack_object_cap_refuses_without_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let req = request(root.path());
+        let mut guard = StagingAdmission::acquire(root.path(), &req).unwrap();
+        let first = seed_cursor();
+        persist(root.path(), &mut guard, (8192, 1), &first, &req).unwrap();
+        let path = pack_path(root.path(), &token(&first)[PREFIX.len()..]);
+        let mut second = first.clone();
+        let second = (1..10000)
+            .find_map(|sequence| {
+                second.sequence = sequence;
+                (pack_path(root.path(), &token(&second)[PREFIX.len()..]) != path)
+                    .then(|| second.clone())
+            })
+            .expect("synthetic different-bucket search exhausted");
+        assert_ne!(
+            pack_path(root.path(), &token(&second)[PREFIX.len()..]),
+            path
+        );
+        assert!(serde_json::to_vec(&second).unwrap().len() + 66 <= 4096);
+        let retained = files(root.path());
+        // Enough bytes for both packs: only the new-object cap can refuse.
+        let err = persist(root.path(), &mut guard, (16384, 1), &second, &req).unwrap_err();
         assert_eq!(err.code, "session_turn_staging_capacity_exceeded");
         assert!(!err.retryable);
         assert_eq!(files(root.path()), retained);
         fs::create_dir(root.path().join("unexpected-directory")).unwrap();
         assert!(persist(root.path(), &mut guard, STAGING_LIMITS, &second, &req).is_err());
+        fs::remove_dir(root.path().join("unexpected-directory")).unwrap();
+        persist(root.path(), &mut guard, (16384, 2), &second, &req).unwrap();
+        assert_eq!((guard.bytes, guard.objects), (16384, 2));
+        assert_eq!(files(root.path()).len(), 2);
+        assert_eq!(fs::read(path).unwrap(), retained[0].1);
     }
 
     #[cfg(unix)]
