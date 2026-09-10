@@ -1,10 +1,40 @@
-# Contract snapshot provenance
+# Contract provenance and local observation extension
 
-These JSON schemas are an exact snapshot of the `contract/v1` product contract
-at `nestharus/agent-runner` commit
-`686970d63043a65510081fdfcb79e66d790936bc`.
+These schemas originated as the `contract/v1` product-contract snapshot at
+[`nestharus/agent-runner@686970d63043a65510081fdfcb79e66d790936bc`](https://github.com/nestharus/agent-runner/tree/686970d63043a65510081fdfcb79e66d790936bc/contract/v1).
+The hashes below identify that **historical snapshot**, not the current extended
+session schema. The historical session schema's exact provider-carried bytes
+remain available from immutable provider reference
+`b16acca32e8f52a72024c2a460200a5e5a3a8344:contract/v1/session.schema.json`.
+No copy, backup, or revised claim about that historical identity is required.
 
-SHA-256 identities:
+## Local provider observation extension (AGE-347)
+
+`session.schema.json` now describes the approved provider-local
+`user_observation` native-I/O allowance in `SessionReadTurnsResult`:
+
+- The total includes metadata, forward scanning and native prefix reconstruction.
+- Observation totals have a structural maximum of 16,777,215 bytes, from the
+  unchanged maximum quantum (8,388,608) plus a prefix strictly below 8,388,608.
+- Observation results require exactly one `codex_observation_io_v1` accounting
+  warning. The schema constrains its shape; the consumer must additionally
+  validate the category sum and the per-request quantum, as described in README.
+- Canonical totals retain their 8,388,608 schema maximum and their per-request
+  source quota. Request bounds and other result fields are unchanged.
+
+This is a local extension to the pinned v1 snapshot, **not upstream acceptance**
+or a claim that the historical snapshot already allowed these totals. A paired
+consumer must align its executable result schema and native-I/O validator before
+accepting this observation extension. This work changes no other schema.
+
+The carried `common.schema.json` already differs from the historical hash below:
+provider commit `268e81dacd1b8b9b50e980bb9a7bae38a9d80468` added the separately
+selected terminal-unavailability extension. Its current SHA-256 is
+`aed77a4ce27a3f4a5d4b8a5c0aa00e8928a3d47464736fde0dd1e50d88d0f30b`.
+That existing extension is not an AGE-347 observation change. All other schema
+files still match their listed historical hashes.
+
+## Historical snapshot SHA-256 identities
 
 ```text
 9c7a82abf0f4de531802e539ac767cedd95c73b4a7213f21b4507d7b0678b1b0  common.schema.json
