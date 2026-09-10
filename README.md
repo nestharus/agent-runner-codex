@@ -480,3 +480,85 @@ Canonical packing, allocation admission, prefix files, token encoding and native
 accounting retain the AGE-353 behavior described above. Old binaries cannot consume `codex-obs1-` tokens;
 rollback requires a compatible reader or an explicit bounded reconciliation
 plan, never deletion/reset of retained observation or canonical evidence.
+
+### Active native notification receipt (AGE-355)
+
+The existing opt-in `session_turn_pages_v1` capability (host selection:
+`OULIPOLY_HOST_SESSION_TURN_PAGES_V1=1`) and bounded
+`session.read_turns` / `user_observation` projection are sufficient to query
+receipt while a native exec is still running. No new operation, marker, wire
+field, native parser in Runner, model call, or permanent observer service is
+needed. This candidate reuses the **active provider-carried contract**, including
+its documented AGE-347 local I/O extension; it does not claim a matching canonical
+SDK snapshot. Canonical SDK alignment remains unresolved future integration,
+not a prerequisite for developing or testing this provider candidate.
+
+Receipt here means one exact canonical notification envelope newly observed as
+user input in the bound trusted native history, within a completed finite
+post-anchor snapshot. It is **not** human-origin authentication, exclusive input-
+entry provenance, model understanding, assistant response, task success, or
+power-loss durability. HMAC cursors authenticate checkpoints, not native content.
+The trusted-writer/append-only premise remains necessary; unclassified exact
+user-role replay by that writer is indistinguishable from input. In particular,
+absence of a receipt is not permission to resend or evidence of rejection.
+
+Provider interpretation is applied before returning structured turn evidence:
+
+- Only top-level `response_item` / `message`, exact role `user`, is eligible.
+  Event echoes, assistant/tool messages and nested replacement history are not
+  searched. The first session metadata and cursor source/account/settings/session/
+  projection/nonce/budget fences remain unchanged.
+- Content must be a nonempty array entirely of textual `input_text` or
+  `output_text` entries with string `text`. Images, audio, unknown/nontext entries,
+  malformed content and mixed text/nontext records are excluded, not reduced to
+  a misleading exact-text match. Canonical ingestion is unchanged.
+- Optional `internal_chat_message_metadata_passthrough.content_item_kinds`, when
+  present and non-null, must align one-for-one with content and contain only
+  `user.text`. Context classifications (including `compaction.summary`), unknown
+  kinds and malformed metadata are excluded. Missing/null classifications remain
+  eligible under the stated premise; this is not a new positive-provenance gate.
+  Native item/runtime-turn IDs neither authorize receipt nor replace the existing
+  synthetic `session:byte:offset` record ID / null parent.
+- Canonical text concatenates chunks without an inserted separator, strips only
+  an optional whitespace-delimited **terminal** `[OULIPOLY-DELIVERY <expected nonce>]`
+  trailer, normalizes CRLF and CR to LF, then trims outer whitespace. The interior
+  envelope nonce remains hashed. A wrong trailer, wrong nonce, or longer quotation
+  does not match the full expected digest. `body_sha256` is the separate serialized
+  chunk digest; `canonical_text_sha256` is the receipt-comparison field even when
+  inline bodies are omitted.
+
+Runner integration sequence (existing fields only):
+
+1. Before submission, bind the exact attempt/envelope digest and nonce; request
+   `start_mode: "tail"`, null tokens, `turn_projection: "user_observation"`,
+   `expected_delivery_nonce: <64 hex>`. Persist the returned `resume_token` as the
+   original pre-submit anchor. A tail anchors the last complete-record boundary,
+   not the wall-clock creation time of every byte of an incomplete suffix.
+2. During the active invocation, request `start_mode: "beginning"` with
+   `after_token: <anchor or persisted resume token>`. Continue an incomplete
+   snapshot with `start_mode: "continuation"`, its `snapshot_id` and
+   `next_page_token`, clearing `after_token`. Preserve all binding and budget
+   fields. Resume subsequent snapshots from their returned `resume_token`.
+3. Validate the typed provider response, its identity, snapshot/page/sequence,
+   source accounting and whole-envelope canonical digest. Count across the
+   **entire finite snapshot**; exactly one match permits the consumer's exact-
+   attempt receipt decision. Zero is unknown; two is ambiguous. Future uniqueness
+   is not promised. `snapshot_complete: true, source_final: false` never means the
+   invocation finished. Do not wait for assistant output or reuse terminalization
+   to publish receipt/ACK.
+4. Persist progress with the consumer's CAS fences, fixed observation stop and
+   fair page/byte/time budgets; recheck stop/ownership/explicit partial or full
+   ACK at publication. Partial lines produce no record until newline/valid JSON;
+   stale-source errors and budget failures retain uncertainty, not a fresh anchor
+   or implicit retry of the delivery. Existing source reconstruction limits above
+   still apply (total is not just the requested forward quantum).
+
+Root owns scheduling, ACK/lifecycle races and rollout pairing. Do not promote
+persisted match counts from an older provider's more permissive projection as
+newly qualified evidence: unresolved attempts needing these exclusions must be
+reobserved from their **original** anchor under one selected provider revision,
+without resubmission or replacing that anchor. Old token mechanics remain
+readable, but cached page interpretations are not retroactively requalified.
+PTY native-ACK expansion and native response-progress correlation remain future
+work; current PTY transport/drain ACK and old prompt-submission markers keep their
+existing meaning.
