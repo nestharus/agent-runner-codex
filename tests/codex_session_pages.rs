@@ -555,7 +555,7 @@ fn age343_staged_prefix_preserves_identity_generation_and_integrity_fences() {
                         .unwrap()
                         .strip_prefix("codex-stp1-")
                         .unwrap();
-                    root.join(format!("{token}.json"))
+                    root.join(format!("cursors-{}.pack", &token[..2]))
                 } else {
                     fs::read_dir(root)
                         .unwrap()
@@ -650,8 +650,16 @@ fn age343_legacy_cursor_without_staging_fields_resumes_at_exact_record_boundary(
         .unwrap();
     // Manufacture an OLD-schema checkpoint in this synthetic fixture only.
     // No provider-state, DB or cursor from the real incident is read or changed.
-    let mut legacy: Value =
-        serde_json::from_slice(&fs::read(root.join(format!("{token}.json"))).unwrap()).unwrap();
+    let mut legacy: Value = serde_json::from_slice(
+        fs::read(root.join(format!("cursors-{}.pack", &token[..2])))
+            .unwrap()
+            .split(|b| *b == b'\n')
+            .find(|line| line.starts_with(token.as_bytes()))
+            .unwrap()
+            .get(65..)
+            .unwrap(),
+    )
+    .unwrap();
     legacy.as_object_mut().unwrap().remove("partial_record");
     legacy["offset"] = json!(boundary);
     legacy["page"] = json!(3);

@@ -259,13 +259,15 @@ Resource envelope:
 - Framing assembles at most 8 MiB of record/page bytes per call. Immutable staging
   reads are separate from **native** source accounting: at most one prefix
   below 8 MiB, plus at most one same-sized collision-validation read; cursor
-  reads are limited to 32 KiB. Prefix staging writes less than 8 MiB per call.
+  JSON is limited to 32 KiB per frame; packed cursor lookup streams a hash bucket
+  under the storage-budget bound described below. Prefix staging writes less than
+  8 MiB per call.
   Buffer allocation capacity may exceed logical byte length; JSON/projection
   allocations are additionally proportional to this bounded record. This is
   not a measured or allocator-enforced whole-process RSS cap.
 - At most 256 turns, 524,288 response bytes and 65,536 inline body bytes remain
   supported; JSON parsing retains serde_json's depth limit. Work is bounded by
-  these limits and the existing directory discovery limits (100,000 rollouts,
+  these limits, the paging-store budget, and directory discovery limits (100,000 rollouts,
   400,000 entries), not the entire transcript length. Staging can reread/hash a
   prefix on each quantum; total catch-up work is not claimed to be single-pass.
 
@@ -295,38 +297,63 @@ session, rewrite native records, or manually advance a production cursor to
 bypass this boundary. Canonical catch-up does not reconstruct native model
 context or settle a native UI/history complaint.
 
-### AGE-343 paging-state admission and containment
+### Paging-state admission, packed cursors (AGE-353), and containment
 
 The canonical `host.data_root/provider-state/codex/session-pages-v1` scope
-(or the existing default data root) admits at most **536,870,912 logical file
-bytes and 4,096 file objects**, including cursor JSON, immutable record prefixes,
-and all temporary/orphan files. This is a paging-scope limit, not a bound on the
-whole provider, filesystem block allocation, directory metadata, or process RSS.
-A directory-inode advisory lock serializes forward paging requests across threads,
-processes and path aliases. All writers must use this compatible implementation;
-concurrent older/noncooperating writers are not supported. Do not remove/replace
-the locked scope while serving requests. No native-history lock or mutation is
-introduced.
+(or the existing default data root) has a **512 MiB accounted storage budget**.
+Each file charges its logical length rounded up to 4 KiB, plus a 4 KiB object
+allowance; empty files charge 4 KiB. The corresponding maximum object count is
+131,072 (512 MiB / 4 KiB), not an independent allowance for that many large files.
+This replaces AGE-343's independent 4,096-object ceiling: an inherited store of
+4,464 ~503-byte cursors charges about 35 MiB, rather than being unserviceable
+solely because of its file count. These are accounting units, not a universal
+filesystem allocation, metadata, provider-wide disk, or process RSS guarantee.
+Actual filesystem failures remain distinct I/O errors; quota refusal returns
+fixed `session_turn_staging_capacity_exceeded`, never a completed page.
 
-Under the lock, each new write reserves its exact payload bytes and one object
-against retained files before creating its temporary. Atomic rename preserves
-that single-object reservation during publication. Prefix and cursor publication
-remain separately synchronized in that order. Recovery rescans actual files:
-interrupted partial temporaries and published orphans remain charged, not deleted.
-A process that exits releases its pending reservation; any surviving bytes are
-charged by the next writer. The scan uses constant accumulation memory and stops
-at the first over-limit entry (at most 4,097 entries in the production envelope).
-Unexpected non-file entries fail closed. There is no retention GC, token expiry,
-replay eviction, or new native integrity claim.
+New cursors keep the same opaque hash tokens and JSON contents but append to
+256 fixed hash-prefix buckets (`cursors-xx.pack`), instead of allocating one
+inode per token. Each frame is `sha256`, a space, serialized cursor JSON, and a
+newline. Reads stream bounded frames (32 KiB cursor plus framing), checking each
+complete frame's digest; they scan the selected bucket, not all retained cursor
+contents. Worst-case bucket scan is bounded by the storage budget, not the
+native-source quantum. Bucketing is not a guarantee of uniform hash distribution
+or constant lookup latency. Repeated observations consume retained history bytes
+but at most 256 new cursor objects. Prefix files still consume individual charged
+objects. There is no expiry, replay eviction, or reference-based GC: finite retained
+history can eventually exhaust the budget and requires an explicit operator decision.
+No infinite-history serviceability is claimed.
 
-Exact byte-validated existing content is reused before reservation, including
-when retained state exceeds limits. Existing above-limit state is preserved; no
-new file allocation is admitted. Failure to admit either a prefix or cursor
-returns fixed `session_turn_staging_capacity_exceeded`, never a completed page.
-An admitted prefix followed by a failed cursor write can remain as a charged
-orphan. Old opaque checkpoints and all previously issued replay dependencies
-remain intact. Actual filesystem I/O failures remain distinct from quota refusal.
-Per-record/source/response limits described above are unchanged.
+A directory-inode advisory lock serializes complete paging requests across
+threads, processes, and aliases. Admission rescans actual files with constant
+accumulation memory; unexpected non-file entries fail closed. Never replace or
+unlink that directory while serving requests. No native-history lock is added.
+New files and pack growth reserve their full incremental charge before writing.
+Prefix files retain synchronized temporary-file/rename publication. Pack appends
+sync the file and directory before returning a token. After interruption only an
+incomplete final frame (which could not have supplied an issued token) is truncated
+and synced before a replacement append. Complete frames and legacy files are never
+removed, including unreferenced frames. Complete corrupt frames fail closed rather
+than being silently repaired. Temporary/orphan files remain charged on restart.
+Exact byte-validated dedup works even above limits; packed dedup resynchronizes
+publication, including a complete frame left by a writer that exited before fsync.
+Per-record/source/response limits and cursor identity/budget/generation checks remain
+unchanged. Legacy partial-record dependencies are retained and resolved unchanged.
+
+**Upgrade and rollback:** no migration, relocation, cleanup, or DB-reference scan
+is needed. Leave every legacy hash-named JSON and `record-*.part` file in place.
+New readers accept both legacy and packed tokens. Old binaries can still read
+legacy tokens, but cannot read newly packed tokens and still enforce the obsolete
+object cap. Before enabling the new writer, stop/drain all old paging binaries
+sharing this data root, including in-flight provider operations; switch every
+invocation route to the new reader/writer. Cooperating new processes can run
+concurrently immediately, through the existing directory lock. Mixed old/new
+paging service is **not supported**: unchanged legacy readability is not permission
+to hand new tokens to old readers. Once any packed token is issued, rollback to an
+old-only reader would violate replay obligations. Use a forward correction (or
+containment that retains this reader); do not delete packs or revert to an old
+binary as recovery. Root must verify cutover/fleet readiness and the actual stalled
+observation/delivery separately; fixture replay is not receiver evidence.
 
 A separate ticket-prefixed containment commit changes only the compile-time
 paging switch. It returns `session_turn_paging_paused` before any paging read,

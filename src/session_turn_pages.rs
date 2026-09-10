@@ -5,7 +5,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const PROTOCOL: &str = "oulipoly.session_turn_pages/v1";
@@ -263,8 +263,15 @@ fn load(root: &Path, value: &str, request: &RequestEnvelope) -> Result<Cursor, P
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
         .ok_or_else(|| stale(request))?;
-    let bytes = crate::durable_fs::read_file_bounded(&root.join(format!("{suffix}.json")), 32768)
-        .map_err(|_| stale(request))?;
+    let legacy = root.join(format!("{suffix}.json"));
+    let bytes = if legacy.exists() {
+        crate::durable_fs::read_file_bounded(&legacy, 32768).map_err(|_| stale(request))?
+    } else {
+        scan_pack(&pack_path(root, suffix), suffix)
+            .map_err(|_| stale(request))?
+            .0
+            .ok_or_else(|| stale(request))?
+    };
     if sha256_hex(&bytes) != suffix {
         return Err(stale(request));
     }
@@ -279,6 +286,9 @@ fn persist(
     request: &RequestEnvelope,
 ) -> Result<(), ProviderFailure> {
     let bytes = serde_json::to_vec(cursor).unwrap();
+    if bytes.len() > 32768 {
+        return Err(io_error(request));
+    }
     let path = root.join(format!("{}.json", sha256_hex(&bytes)));
     if path.exists() {
         if crate::durable_fs::read_file_bounded(&path, 32768).map_err(|_| io_error(request))?
@@ -288,14 +298,106 @@ fn persist(
         }
         return Err(stale(request));
     }
-    admission.reserve(root, bytes.len(), limits, request)?;
-    let mut temp = tempfile::NamedTempFile::new_in(root).map_err(|_| io_error(request))?;
-    temp.write_all(&bytes).map_err(|_| io_error(request))?;
-    temp.as_file().sync_all().map_err(|_| io_error(request))?;
-    temp.persist(&path).map_err(|_| io_error(request))?;
-    File::open(root)
-        .and_then(|f| f.sync_all())
-        .map_err(|_| io_error(request))
+    let digest = sha256_hex(&bytes);
+    let path = pack_path(root, &digest);
+    let (existing, valid_end, physical_len) =
+        scan_pack(&path, &digest).map_err(|_| io_error(request))?;
+    if let Some(existing) = existing {
+        if existing != bytes {
+            return Err(stale(request));
+        }
+        // A previous process may have died after completing the frame but
+        // before syncing it. Dedup must complete publication before returning.
+        return sync_pack(&path, root).map_err(|_| io_error(request));
+    }
+    let frame = format!("{digest} {}\n", String::from_utf8(bytes).unwrap());
+    let old_charge = if path.exists() {
+        charged_bytes(physical_len)
+    } else {
+        0
+    };
+    let new_charge = charged_bytes(valid_end + frame.len() as u64);
+    admission.reserve_growth(
+        root,
+        new_charge.saturating_sub(old_charge),
+        u64::from(!path.exists()),
+        limits,
+        request,
+    )?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|_| io_error(request))?;
+    // Only an incomplete final frame is reclaimable: no issued token could
+    // reference it. Complete frames, even unreferenced ones, never expire.
+    if physical_len != valid_end {
+        file.set_len(valid_end).map_err(|_| io_error(request))?;
+        file.sync_all().map_err(|_| io_error(request))?;
+    }
+    file.seek(SeekFrom::Start(valid_end))
+        .map_err(|_| io_error(request))?;
+    file.write_all(frame.as_bytes())
+        .map_err(|_| io_error(request))?;
+    sync_pack(&path, root).map_err(|_| io_error(request))
+}
+
+// Fixed hash buckets bound new cursor inode growth to 256, without a mutable
+// index or migration of legacy tokens. All access is under the directory lock.
+fn pack_path(root: &Path, digest: &str) -> PathBuf {
+    root.join(format!("cursors-{}.pack", &digest[..2]))
+}
+
+fn sync_pack(path: &Path, root: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()?;
+    File::open(root)?.sync_all()
+}
+
+// Returns matching content, end of complete verified frames, physical length.
+// An interrupted append has no newline; bounded streaming never loads a pack.
+fn scan_pack(path: &Path, digest: &str) -> std::io::Result<(Option<Vec<u8>>, u64, u64)> {
+    use std::io::{Error, ErrorKind};
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok((None, 0, 0)),
+        Err(e) => return Err(e),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > STAGING_LIMITS.0 {
+        return Err(Error::other("invalid cursor pack"));
+    }
+    let mut reader = BufReader::new(file);
+    let mut end = 0;
+    let mut found = None;
+    loop {
+        let mut frame = Vec::new();
+        (&mut reader).take(32835).read_until(b'\n', &mut frame)?;
+        if frame.is_empty() {
+            break;
+        }
+        if frame.len() > 32834 {
+            return Err(Error::other("oversized cursor frame"));
+        }
+        if frame.last() != Some(&b'\n') {
+            break;
+        }
+        if frame.len() < 67 || frame[64] != b' ' {
+            return Err(Error::other("invalid cursor frame"));
+        }
+        let bytes = &frame[65..frame.len() - 1];
+        let hash = sha256_hex(bytes);
+        if hash.as_bytes() != &frame[..64] {
+            return Err(Error::other("corrupt cursor frame"));
+        }
+        if hash == digest {
+            found = Some(bytes.to_vec());
+        }
+        end += frame.len() as u64;
+    }
+    Ok((found, end, metadata.len()))
 }
 
 fn record_limit(request: &RequestEnvelope) -> ProviderFailure {
@@ -349,7 +451,13 @@ struct StagingAdmission {
     objects: u64,
 }
 
-const STAGING_LIMITS: (u64, u64) = (512 * 1024 * 1024, 4096);
+const STAGING_LIMITS: (u64, u64) = (512 * 1024 * 1024, 512 * 1024 * 1024 / 4096);
+
+// Conservative allocation quantum plus per-inode allowance. Logical content
+// and metadata both consume budget; tiny legacy files cannot evade accounting.
+fn charged_bytes(len: u64) -> u64 {
+    (len.saturating_add(4095) / 4096 * 4096).saturating_add(4096)
+}
 
 fn storage_limit(request: &RequestEnvelope) -> ProviderFailure {
     ProviderFailure::unsupported(
@@ -377,6 +485,17 @@ impl StagingAdmission {
         limits: (u64, u64),
         request: &RequestEnvelope,
     ) -> Result<(), ProviderFailure> {
+        self.reserve_growth(root, charged_bytes(bytes as u64), 1, limits, request)
+    }
+
+    fn reserve_growth(
+        &mut self,
+        root: &Path,
+        bytes: u64,
+        objects: u64,
+        limits: (u64, u64),
+        request: &RequestEnvelope,
+    ) -> Result<(), ProviderFailure> {
         // Recover from the filesystem, not a possibly stale ledger. Interrupted
         // temporary writes and published-but-unreferenced prefixes remain
         // charged forever; no replay dependency is collected.
@@ -388,14 +507,14 @@ impl StagingAdmission {
             if !metadata.is_file() {
                 return Err(storage_limit(request));
             }
-            retained_bytes = retained_bytes.saturating_add(metadata.len());
+            retained_bytes = retained_bytes.saturating_add(charged_bytes(metadata.len()));
             retained_objects = retained_objects.saturating_add(1);
             if retained_bytes > limits.0 || retained_objects > limits.1 {
                 return Err(storage_limit(request));
             }
         }
-        self.bytes = retained_bytes.saturating_add(bytes as u64);
-        self.objects = retained_objects.saturating_add(1);
+        self.bytes = retained_bytes.saturating_add(bytes);
+        self.objects = retained_objects.saturating_add(objects);
         if self.bytes > limits.0 || self.objects > limits.1 {
             return Err(storage_limit(request));
         }
@@ -829,20 +948,20 @@ mod admission_tests {
         let root = tempfile::tempdir().unwrap();
         let req = request(root.path());
         let mut guard = StagingAdmission::acquire(root.path(), &req).unwrap();
-        guard.reserve(root.path(), 6, (10, 2), &req).unwrap();
-        assert_eq!((guard.bytes, guard.objects), (6, 1));
+        guard.reserve(root.path(), 6, (16384, 2), &req).unwrap();
+        assert_eq!((guard.bytes, guard.objects), (8192, 1));
         // Simulated interruption after partial temp write: reservation dies
         // with writer, but the actual retained orphan is charged on restart.
         fs::write(root.path().join("interrupted-temp"), b"1234").unwrap();
         drop(guard);
         let mut guard = StagingAdmission::acquire(root.path(), &req).unwrap();
-        let first = stage_partial(root.path(), &mut guard, (10, 2), 0, b"abcdef", &req).unwrap();
-        assert_eq!((guard.bytes, guard.objects), (10, 2));
+        let first = stage_partial(root.path(), &mut guard, (16384, 2), 0, b"abcdef", &req).unwrap();
+        assert_eq!((guard.bytes, guard.objects), (16384, 2));
         let before = files(root.path());
-        stage_partial(root.path(), &mut guard, (10, 2), 0, b"abcdef", &req).unwrap();
+        stage_partial(root.path(), &mut guard, (16384, 2), 0, b"abcdef", &req).unwrap();
         assert_eq!(files(root.path()), before); // no duplicate temp even at limit
         assert_eq!(
-            stage_partial(root.path(), &mut guard, (10, 2), 0, b"z", &req)
+            stage_partial(root.path(), &mut guard, (16384, 2), 0, b"z", &req)
                 .unwrap_err()
                 .code,
             "session_turn_staging_capacity_exceeded"
@@ -854,8 +973,8 @@ mod admission_tests {
                 .sha256,
             first.sha256
         );
-        assert!(stage_partial(root.path(), &mut guard, (9, 9), 0, b"y", &req).is_err());
-        assert!(stage_partial(root.path(), &mut guard, (100, 2), 0, b"y", &req).is_err());
+        assert!(stage_partial(root.path(), &mut guard, (16383, 9), 0, b"y", &req).is_err());
+        assert!(stage_partial(root.path(), &mut guard, (100000, 2), 0, b"y", &req).is_err());
         assert_eq!(files(root.path()), before);
     }
 
@@ -871,7 +990,8 @@ mod admission_tests {
                     let req = request(&root);
                     barrier.wait();
                     let mut guard = StagingAdmission::acquire(&root, &req).unwrap();
-                    stage_partial(&root, &mut guard, (12, 2), 0, &[b'a' + i; 6], &req).map(|_| ())
+                    stage_partial(&root, &mut guard, (16384, 2), 0, &[b'a' + i; 6], &req)
+                        .map(|_| ())
                 })
             })
             .collect();
@@ -896,7 +1016,7 @@ mod admission_tests {
         );
         let req = request(&root);
         let mut guard = StagingAdmission::acquire(&root, &req).unwrap();
-        guard.reserve(&root, 6, (10, 2), &req).unwrap();
+        guard.reserve(&root, 6, (16384, 2), &req).unwrap();
         let mut temp = tempfile::NamedTempFile::new_in(&root).unwrap();
         temp.write_all(b"abc").unwrap();
         temp.as_file().sync_all().unwrap();
@@ -925,9 +1045,9 @@ mod admission_tests {
         assert_eq!(orphan[0].1, b"abc");
         let req = request(root.path());
         let mut guard = StagingAdmission::acquire(root.path(), &req).unwrap();
-        stage_partial(root.path(), &mut guard, (10, 2), 0, b"123456", &req).unwrap();
-        assert_eq!((guard.bytes, guard.objects), (9, 2));
-        assert!(stage_partial(root.path(), &mut guard, (10, 2), 0, b"x", &req).is_err());
+        stage_partial(root.path(), &mut guard, (16384, 2), 0, b"123456", &req).unwrap();
+        assert_eq!((guard.bytes, guard.objects), (16384, 2));
+        assert!(stage_partial(root.path(), &mut guard, (16384, 2), 0, b"x", &req).is_err());
         assert!(files(root.path()).iter().any(|entry| entry == &orphan[0]));
     }
 
@@ -935,18 +1055,18 @@ mod admission_tests {
     fn exhausted_request_preserves_checkpoint_and_replay_not_completion() {
         let (_tmp, req, path) = fixture();
         let original = fs::read(&path).unwrap();
-        let first = read_turns_with_limits(&req, (2000, 2)).unwrap();
+        let first = read_turns_with_limits(&req, (16384, 2)).unwrap();
         assert_eq!(first["snapshot_complete"], false);
         assert_eq!(first["scan_progress"], true);
         let root = state_root(&req).unwrap();
         let before = files(&root);
-        assert_eq!(read_turns_with_limits(&req, (2000, 2)).unwrap(), first);
+        assert_eq!(read_turns_with_limits(&req, (16384, 2)).unwrap(), first);
         let mut next = req.clone();
         next.params["start_mode"] = json!("continuation");
         next.params["snapshot_id"] = first["snapshot_id"].clone();
         next.params["page_token"] = first["next_page_token"].clone();
         assert_eq!(
-            read_turns_with_limits(&next, (2000, 2)).unwrap_err().code,
+            read_turns_with_limits(&next, (16384, 2)).unwrap_err().code,
             "session_turn_staging_capacity_exceeded"
         );
         assert_eq!(files(&root), before);
@@ -958,7 +1078,7 @@ mod admission_tests {
     fn failed_cursor_publication_leaves_only_admitted_recoverable_prefix() {
         let (_tmp, req, _) = fixture();
         assert_eq!(
-            read_turns_with_limits(&req, (2000, 1)).unwrap_err().code,
+            read_turns_with_limits(&req, (16384, 1)).unwrap_err().code,
             "session_turn_staging_capacity_exceeded"
         );
         let root = state_root(&req).unwrap();
@@ -967,7 +1087,7 @@ mod admission_tests {
         assert!(orphan[0].0.extension().is_some_and(|s| s == "part"));
         // Simulate restart after prefix publication, before cursor publication.
         // Reuse that prefix; reserve only the newly needed cursor.
-        let first = read_turns_with_limits(&req, (2000, 2)).unwrap();
+        let first = read_turns_with_limits(&req, (16384, 2)).unwrap();
         assert_eq!(first["snapshot_complete"], false);
         let state = files(&root);
         assert_eq!(state.len(), 2);
@@ -986,7 +1106,7 @@ mod admission_tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    read_turns_with_limits(&req, (2000, 2)).unwrap()
+                    read_turns_with_limits(&req, (16384, 2)).unwrap()
                 })
             })
             .collect();
@@ -1058,5 +1178,358 @@ mod admission_tests {
         let fresh = tempfile::tempdir().unwrap();
         assert!(read_turns_mode(&request(fresh.path()), false).is_err());
         assert!(files(fresh.path()).is_empty());
+    }
+    fn seed_cursor() -> Cursor {
+        Cursor {
+            kind: "resume".into(),
+            binding: Binding {
+                provider: "p".into(),
+                account: "/a".into(),
+                settings: "s".into(),
+                session: "s".into(),
+                projection: "canonical_ingest".into(),
+                nonce: None,
+            },
+            budgets: Budgets {
+                turns: 8,
+                response: 4096,
+                source: 512,
+                inline: 100,
+            },
+            stamp: Stamp {
+                device: 1,
+                inode: 2,
+                len: 1000,
+                modified: 1,
+            },
+            snapshot: "s".repeat(64),
+            offset: 1000,
+            page: 0,
+            sequence: 0,
+            partial_record: None,
+        }
+    }
+
+    #[test]
+    fn inherited_4464_small_legacy_cursors_restore_tail_and_postanchor() {
+        let (_tmp, mut req, native) = fixture();
+        req.params["turn_projection"] = json!("user_observation");
+        req.params["expected_delivery_nonce"] = json!("a".repeat(64));
+        req.params["start_mode"] = json!("tail");
+        let anchor = read_turns_with_limits(&req, STAGING_LIMITS).unwrap();
+        let root = state_root(&req).unwrap();
+        let old_token = anchor["resume_token"].as_str().unwrap();
+        let state = load(&root, old_token, &req).unwrap();
+        // Synthetic pre-upgrade layout, not a migration or production copy.
+        fs::write(
+            root.join(format!("{}.json", &old_token[PREFIX.len()..])),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(pack_path(&root, &old_token[PREFIX.len()..])).unwrap();
+        let mut tokens = vec![old_token.to_owned()];
+        for i in 0..4463 {
+            let mut cursor = seed_cursor();
+            cursor.sequence = i;
+            cursor.snapshot.clear();
+            let len = serde_json::to_vec(&cursor).unwrap().len();
+            cursor.snapshot = "s".repeat(503 - len);
+            let bytes = serde_json::to_vec(&cursor).unwrap();
+            let digest = sha256_hex(&bytes);
+            fs::write(root.join(format!("{digest}.json")), bytes).unwrap();
+            tokens.push(format!("{PREFIX}{digest}"));
+        }
+        let inherited = files(&root);
+        assert_eq!(inherited.len(), 4464);
+        let logical: usize = inherited.iter().map(|(_, bytes)| bytes.len()).sum();
+        assert!((2_240_000..2_250_000).contains(&logical), "{logical}");
+        // Both durable and memory-only issued tokens survive, not just a mark set.
+        for token in tokens {
+            assert_eq!(token, super::token(&load(&root, &token, &req).unwrap()));
+        }
+        assert_eq!(read_turns_with_limits(&req, (0, 0)).unwrap(), anchor);
+        req.params["expected_delivery_nonce"] = json!("b".repeat(64));
+        let fresh = read_turns_with_limits(&req, STAGING_LIMITS).unwrap();
+        assert_ne!(fresh["resume_token"], anchor["resume_token"]);
+        let mut source = fs::OpenOptions::new().append(true).open(&native).unwrap();
+        writeln!(
+            source,
+            "{}",
+            json!({"type":"compacted","payload":{"text":"x".repeat(900)}})
+        )
+        .unwrap();
+        writeln!(source, "{}", json!({"timestamp":"2026-09-04T12:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"new delivery"}]}})).unwrap();
+        req.params["start_mode"] = json!("beginning");
+        req.params["after_token"] = fresh["resume_token"].clone();
+        let mut seen = Vec::new();
+        let mut completed = false;
+        for _ in 0..8 {
+            let page = read_turns_with_limits(&req, STAGING_LIMITS).unwrap();
+            assert_eq!(page, read_turns_with_limits(&req, (0, 0)).unwrap());
+            seen.extend(page["turns"].as_array().unwrap().iter().cloned());
+            if page["snapshot_complete"] == true {
+                completed = true;
+                break;
+            }
+            let cursor = load(&root, page["next_page_token"].as_str().unwrap(), &req).unwrap();
+            assert!(!partial_bytes(&root, &cursor, &req).unwrap().is_empty());
+            req.params["start_mode"] = json!("continuation");
+            req.params["after_token"] = Value::Null;
+            req.params["snapshot_id"] = page["snapshot_id"].clone();
+            req.params["page_token"] = page["next_page_token"].clone();
+        }
+        assert!(completed);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["body"][0]["text"], "new delivery");
+        let retained = files(&root);
+        assert!(inherited.iter().all(|entry| retained.contains(entry)));
+        // Original old-schema token still resumes against the appended source.
+        req.params["start_mode"] = json!("beginning");
+        req.params["expected_delivery_nonce"] = json!("a".repeat(64));
+        req.params["after_token"] = json!(old_token);
+        req.params["page_token"] = Value::Null;
+        req.params["snapshot_id"] = Value::Null;
+        assert!(read_turns_with_limits(&req, STAGING_LIMITS).is_ok());
+    }
+
+    #[test]
+    fn observation_churn_bounds_cursor_objects_and_charges_retained_history() {
+        let (_tmp, mut req, _) = fixture();
+        req.params["turn_projection"] = json!("user_observation");
+        req.params["start_mode"] = json!("tail");
+        let mut tokens = Vec::new();
+        for i in 0..1024 {
+            req.params["expected_delivery_nonce"] = json!(format!("{i:064x}"));
+            let page = read_turns_with_limits(&req, STAGING_LIMITS).unwrap();
+            tokens.push(page["resume_token"].as_str().unwrap().to_owned());
+        }
+        let root = state_root(&req).unwrap();
+        let retained = files(&root);
+        assert!(retained.len() <= 256);
+        assert!(retained
+            .iter()
+            .all(|(path, _)| path.extension().unwrap() == "pack"));
+        assert_eq!(
+            retained
+                .iter()
+                .map(|(_, bytes)| bytes.iter().filter(|b| **b == b'\n').count())
+                .sum::<usize>(),
+            1024
+        );
+        let charged: u64 = retained
+            .iter()
+            .map(|(_, bytes)| charged_bytes(bytes.len() as u64))
+            .sum();
+        assert!(charged < 4 * 1024 * 1024);
+        for token in tokens {
+            assert_eq!(token, super::token(&load(&root, &token, &req).unwrap()));
+        }
+        let page = read_turns_with_limits(&req, (0, 0)).unwrap();
+        assert!(page["resume_token"].is_string());
+        assert_eq!(files(&root), retained);
+        let mut guard = StagingAdmission::acquire(&root, &req).unwrap();
+        assert!(guard
+            .reserve_growth(&root, 1, 0, (charged, STAGING_LIMITS.1), &req)
+            .is_err());
+        guard
+            .reserve_growth(&root, 0, 0, (charged, STAGING_LIMITS.1), &req)
+            .unwrap();
+        assert_eq!(guard.bytes, charged);
+    }
+
+    fn same_bucket_pair() -> (Cursor, Cursor) {
+        let first = seed_cursor();
+        let bucket = &token(&first)[PREFIX.len()..PREFIX.len() + 2];
+        for i in 1..10000 {
+            let mut second = first.clone();
+            second.sequence = i;
+            if &token(&second)[PREFIX.len()..PREFIX.len() + 2] == bucket {
+                return (first, second);
+            }
+        }
+        panic!("synthetic same-bucket search exhausted");
+    }
+
+    #[test]
+    fn interrupted_pack_publication_all_byte_boundaries_preserve_issued_frames() {
+        let root = tempfile::tempdir().unwrap();
+        let req = request(root.path());
+        let mut guard = StagingAdmission::acquire(root.path(), &req).unwrap();
+        let (first, second) = same_bucket_pair();
+        persist(root.path(), &mut guard, STAGING_LIMITS, &first, &req).unwrap();
+        let path = pack_path(root.path(), &token(&first)[PREFIX.len()..]);
+        let published = fs::read(&path).unwrap();
+        let frame = format!(
+            "{} {}\n",
+            &token(&second)[PREFIX.len()..],
+            serde_json::to_string(&second).unwrap()
+        );
+        // Every partial append, complete-before-fsync, and empty-file creation.
+        for split in 0..=frame.len() {
+            let mut bytes = published.clone();
+            bytes.extend_from_slice(&frame.as_bytes()[..split]);
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                token(&load(root.path(), &token(&first), &req).unwrap()),
+                token(&first)
+            );
+            persist(root.path(), &mut guard, STAGING_LIMITS, &second, &req).unwrap();
+            assert_eq!(
+                token(&load(root.path(), &token(&second), &req).unwrap()),
+                token(&second)
+            );
+            let complete = fs::read(&path).unwrap();
+            assert_eq!(complete, [published.as_slice(), frame.as_bytes()].concat());
+            persist(root.path(), &mut guard, (0, 0), &second, &req).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), complete);
+        }
+        fs::write(&path, []).unwrap();
+        persist(root.path(), &mut guard, STAGING_LIMITS, &first, &req).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), published);
+        let mut corrupted = published.clone();
+        corrupted[65] ^= 1;
+        fs::write(&path, &corrupted).unwrap();
+        assert!(persist(root.path(), &mut guard, STAGING_LIMITS, &second, &req).is_err());
+        assert!(load(root.path(), &token(&first), &req).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+    }
+
+    #[test]
+    fn pack_allocation_boundary_dedup_and_real_exhaustion() {
+        let root = tempfile::tempdir().unwrap();
+        let req = request(root.path());
+        let mut guard = StagingAdmission::acquire(root.path(), &req).unwrap();
+        let (first, mut second) = same_bucket_pair();
+        persist(root.path(), &mut guard, (8192, 1), &first, &req).unwrap();
+        // Same bucket append within already charged allocation works at object cap.
+        persist(root.path(), &mut guard, (8192, 1), &second, &req).unwrap();
+        let retained = files(root.path());
+        persist(root.path(), &mut guard, (0, 0), &first, &req).unwrap();
+        assert_eq!(files(root.path()), retained);
+        second.snapshot = "x".repeat(5000);
+        let err = persist(root.path(), &mut guard, (8192, 1), &second, &req).unwrap_err();
+        assert_eq!(err.code, "session_turn_staging_capacity_exceeded");
+        assert!(!err.retryable);
+        assert_eq!(files(root.path()), retained);
+        fs::create_dir(root.path().join("unexpected-directory")).unwrap();
+        assert!(persist(root.path(), &mut guard, STAGING_LIMITS, &second, &req).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_pack_writers_and_readers_share_alias_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("store");
+        fs::create_dir(&directory).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&directory, &alias).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = if i % 2 == 0 {
+                    directory.clone()
+                } else {
+                    alias.clone()
+                };
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let req = request(&path);
+                    barrier.wait();
+                    for j in 0..32 {
+                        let mut cursor = seed_cursor();
+                        cursor.sequence = j;
+                        let mut guard = StagingAdmission::acquire(&path, &req).unwrap();
+                        persist(&path, &mut guard, STAGING_LIMITS, &cursor, &req).unwrap();
+                        assert_eq!(
+                            token(&load(&path, &token(&cursor), &req).unwrap()),
+                            token(&cursor)
+                        );
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            files(&directory)
+                .iter()
+                .map(|(_, bytes)| bytes.iter().filter(|b| **b == b'\n').count())
+                .sum::<usize>(),
+            32
+        );
+    }
+
+    #[test]
+    fn real_production_budget_rejects_sparse_retained_exhaustion_without_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let req = request(root.path());
+        let mut guard = StagingAdmission::acquire(root.path(), &req).unwrap();
+        let first = seed_cursor();
+        persist(root.path(), &mut guard, STAGING_LIMITS, &first, &req).unwrap();
+        let orphan = File::create(root.path().join("retained-orphan")).unwrap();
+        orphan.set_len(STAGING_LIMITS.0).unwrap();
+        assert!(charged_bytes(u64::MAX) >= STAGING_LIMITS.0);
+        let mut second = first.clone();
+        second.sequence = 123;
+        let error = persist(root.path(), &mut guard, STAGING_LIMITS, &second, &req).unwrap_err();
+        assert_eq!(error.code, "session_turn_staging_capacity_exceeded");
+        assert!(!error.retryable);
+        persist(root.path(), &mut guard, STAGING_LIMITS, &first, &req).unwrap();
+        assert_eq!(orphan.metadata().unwrap().len(), STAGING_LIMITS.0);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    #[ignore = "fixture subprocess only; private root required"]
+    fn pack_process_fixture() {
+        let root = PathBuf::from(std::env::var("AGE353_PACK_FIXTURE_ROOT").unwrap());
+        let req = request(&root);
+        for i in 0..32 {
+            let mut cursor = seed_cursor();
+            cursor.sequence = i;
+            let mut guard = StagingAdmission::acquire(&root, &req).unwrap();
+            persist(&root, &mut guard, STAGING_LIMITS, &cursor, &req).unwrap();
+            assert_eq!(
+                token(&load(&root, &token(&cursor), &req).unwrap()),
+                token(&cursor)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn independent_process_pack_writers_share_alias_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("store");
+        fs::create_dir(&directory).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&directory, &alias).unwrap();
+        let mut children: Vec<_> = (0..4)
+            .map(|i| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "session_turn_pages::admission_tests::pack_process_fixture",
+                        "--ignored",
+                    ])
+                    .env(
+                        "AGE353_PACK_FIXTURE_ROOT",
+                        if i % 2 == 0 { &directory } else { &alias },
+                    )
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for child in &mut children {
+            assert!(child.wait().unwrap().success());
+        }
+        assert_eq!(
+            files(&directory)
+                .iter()
+                .map(|(_, bytes)| bytes.iter().filter(|b| **b == b'\n').count())
+                .sum::<usize>(),
+            32
+        );
     }
 }
