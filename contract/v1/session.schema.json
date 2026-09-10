@@ -313,7 +313,10 @@
           "items": { "$ref": "#/$defs/SessionTurnPageTurn" }
         },
         "page_turn_count": { "type": "integer", "minimum": 0, "maximum": 256 },
-        "source_bytes_examined": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+        "source_bytes_examined": {
+          "type": "integer", "minimum": 0, "maximum": 16777215,
+          "description": "All native reads. Local Codex observation extension: forward + metadata <= requested max_source_bytes; reconstruction < 8388608; their sum equals this total. Canonical retains its original quota."
+        },
         "scan_progress": { "type": "boolean" },
         "snapshot_complete": { "type": "boolean" },
         "next_page_token": { "$ref": "#/$defs/SessionTurnPageToken" },
@@ -343,6 +346,23 @@
         "resume_token",
         "source_final",
         "warnings"
+      ],
+      "allOf": [
+        {
+          "if": { "properties": { "turn_projection": { "const": "canonical_ingest" } } },
+          "then": { "properties": { "source_bytes_examined": { "maximum": 8388608 } } },
+          "else": {
+            "properties": {
+              "warnings": {
+                "minItems": 1,
+                "maxItems": 1,
+                "items": {
+                  "pattern": "^codex_observation_io_v1:forward=[0-9]+;reconstruction=[0-9]+;metadata=[0-9]+$"
+                }
+              }
+            }
+          }
+        }
       ],
       "oneOf": [
         {

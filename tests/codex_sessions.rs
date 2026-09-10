@@ -381,7 +381,7 @@ fn export_and_replace_are_explicitly_unsupported() {
 }
 
 #[test]
-fn session_result_shapes_match_the_preserved_provider_contract() {
+fn session_result_shapes_match_the_provider_contract() {
     let fixture = Fixture::new();
     fixture.write("codex", SESSION, records(SESSION));
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("contract/v1");
@@ -400,6 +400,15 @@ fn session_result_shapes_match_the_preserved_provider_contract() {
             "SessionReadTurnsResult",
             json!({"settings_id":"codex","session_id":SESSION,
                 "read_protocol":"oulipoly.session_turn_pages/v1","turn_projection":"canonical_ingest",
+                "start_mode":"beginning","after_token":null,"snapshot_id":null,"page_token":null,
+                "max_turns":256,"max_response_bytes":524288,"max_source_bytes":8388608,"max_inline_body_bytes":65536}),
+        ),
+        (
+            "session.read_turns",
+            "SessionReadTurnsResult",
+            json!({"settings_id":"codex","session_id":SESSION,
+                "read_protocol":"oulipoly.session_turn_pages/v1","turn_projection":"user_observation",
+                "expected_delivery_nonce":"a".repeat(64),
                 "start_mode":"beginning","after_token":null,"snapshot_id":null,"page_token":null,
                 "max_turns":256,"max_response_bytes":524288,"max_source_bytes":8388608,"max_inline_body_bytes":65536}),
         ),

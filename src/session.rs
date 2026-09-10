@@ -302,12 +302,27 @@ pub(crate) fn locate(
     Ok(found)
 }
 
-/// Native filenames select candidates; their first metadata record still owns
-/// identity. Nonstandard/fork filenames use a bounded metadata fallback.
+pub(crate) fn file_identity(metadata: &fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        (0, 0)
+    }
+}
+
+/// Native filenames select initial candidates; their first metadata record still
+/// owns identity. Nonstandard/fork filenames use a bounded metadata fallback.
+/// An authenticated checkpoint already owns a source device/inode: select that
+/// file before reading headers, independent of unrelated session populations.
 pub(crate) fn locate_page_source(
     root: &Path,
     id: &str,
     maximum: usize,
+    source_identity: Option<(u64, u64)>,
     request: &RequestEnvelope,
 ) -> Result<(File, usize, u64), ProviderFailure> {
     let paths = rollout_paths(root, request)?;
@@ -319,7 +334,7 @@ pub(crate) fn locate_page_source(
                 .is_some_and(|n| n.to_string_lossy().ends_with(&suffix))
         })
         .collect();
-    let candidates: Vec<_> = if named.is_empty() {
+    let candidates: Vec<_> = if source_identity.is_some() || named.is_empty() {
         paths.iter().collect()
     } else {
         named
@@ -327,6 +342,20 @@ pub(crate) fn locate_page_source(
     let mut examined = 0;
     let mut found = None;
     for path in candidates {
+        if let Some(identity) = source_identity {
+            // Filesystem metadata is not a native transcript read. Never open
+            // unrelated headers just to rediscover an already-bound source.
+            let metadata = fs::symlink_metadata(path).map_err(|_| io_failure(request))?;
+            if !metadata.is_file() || file_identity(&metadata) != identity {
+                continue;
+            }
+        }
+        let file = File::open(path).map_err(|_| io_failure(request))?;
+        if source_identity.is_some_and(|identity| {
+            file.metadata().map(|m| file_identity(&m)).ok() != Some(identity)
+        }) {
+            return Err(io_failure(request));
+        }
         let remaining = maximum.saturating_sub(examined);
         if remaining == 0 {
             return Err(ProviderFailure::invalid_request(
@@ -338,12 +367,7 @@ pub(crate) fn locate_page_source(
         // Identity discovery must not prefetch uncharged native bytes. A
         // one-byte buffer trades header syscalls for exact source accounting;
         // the loop remains bounded by this request's remaining source quota.
-        let mut reader = BufReader::with_capacity(
-            1,
-            File::open(path)
-                .map_err(|_| io_failure(request))?
-                .take(remaining as u64),
-        );
+        let mut reader = BufReader::with_capacity(1, file.take(remaining as u64));
         let mut first = Vec::new();
         reader
             .read_until(b'\n', &mut first)
@@ -369,6 +393,11 @@ pub(crate) fn locate_page_source(
                 ));
             }
             found = Some((reader.into_inner().into_inner(), first.len() as u64));
+            // The authenticated physical source is unambiguous even if it has
+            // another hard-link name. Initial discovery still checks all claims.
+            if source_identity.is_some() {
+                break;
+            }
         }
     }
     found

@@ -8,6 +8,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+mod observation;
+
 const PROTOCOL: &str = "oulipoly.session_turn_pages/v1";
 const PREFIX: &str = "codex-stp1-";
 // Independent of the native-source quantum: at most one bounded record is
@@ -201,13 +203,7 @@ fn params(request: &RequestEnvelope) -> Result<Params, ProviderFailure> {
 
 fn stamp(file: &File, request: &RequestEnvelope) -> Result<Stamp, ProviderFailure> {
     let m = file.metadata().map_err(|_| io_error(request))?;
-    #[cfg(unix)]
-    let (device, inode) = {
-        use std::os::unix::fs::MetadataExt;
-        (m.dev(), m.ino())
-    };
-    #[cfg(not(unix))]
-    let (device, inode) = (0, 0);
+    let (device, inode) = crate::session::file_identity(&m);
     Ok(Stamp {
         device,
         inode,
@@ -558,6 +554,144 @@ fn stage_partial(
     Ok(PartialRecord { start, sha256 })
 }
 
+// Storage strategy is selected only by the authenticated request projection.
+// Canonical admission and immutable cursor/prefix serialization stay unchanged.
+enum PageStorage {
+    Canonical {
+        root: PathBuf,
+        admission: StagingAdmission,
+        limits: (u64, u64),
+    },
+    Observation {
+        root: PathBuf,
+        key: [u8; 32],
+    },
+}
+
+impl PageStorage {
+    fn new(
+        root: PathBuf,
+        p: &Params,
+        limits: (u64, u64),
+        request: &RequestEnvelope,
+    ) -> Result<Self, ProviderFailure> {
+        if p.turn_projection == "user_observation" {
+            let key = observation::key(&root, request)?;
+            Ok(Self::Observation { root, key })
+        } else {
+            let admission = StagingAdmission::acquire(&root, request)?;
+            Ok(Self::Canonical {
+                root,
+                admission,
+                limits,
+            })
+        }
+    }
+
+    fn load(
+        &self,
+        value: &str,
+        binding: &Binding,
+        request: &RequestEnvelope,
+    ) -> Result<Cursor, ProviderFailure> {
+        match self {
+            Self::Observation { key, .. } if observation::is_token(value) => {
+                observation::load(key, value, binding, request)
+            }
+            Self::Observation { root, .. } => {
+                // Legacy observation tokens may now reside in mutable packs.
+                // Serialize with cooperating appends/tail recovery, but never
+                // reserve canonical capacity for observation or retain the lock
+                // across source reconstruction.
+                let _guard = StagingAdmission::acquire(root, request)?;
+                load(root, value, request)
+            }
+            Self::Canonical { root, .. } => load(root, value, request),
+        }
+    }
+
+    fn token(&self, cursor: &Cursor) -> String {
+        match self {
+            Self::Observation { key, .. } => observation::token(key, cursor),
+            Self::Canonical { .. } => token(cursor),
+        }
+    }
+
+    fn prefix(
+        &self,
+        file: &mut File,
+        state: &Cursor,
+        request: &RequestEnvelope,
+    ) -> Result<Vec<u8>, ProviderFailure> {
+        match self {
+            Self::Observation { .. } => observation::reconstruct(file, state, request),
+            Self::Canonical { root, .. } => partial_bytes(root, state, request),
+        }
+    }
+
+    fn stage(
+        &mut self,
+        start: u64,
+        bytes: &[u8],
+        request: &RequestEnvelope,
+    ) -> Result<PartialRecord, ProviderFailure> {
+        match self {
+            Self::Observation { .. } => {
+                if bytes.len() >= MAX_RECORD_BYTES {
+                    return Err(record_limit(request));
+                }
+                Ok(PartialRecord {
+                    start,
+                    sha256: sha256_hex(bytes),
+                })
+            }
+            Self::Canonical {
+                root,
+                admission,
+                limits,
+            } => stage_partial(root, admission, *limits, start, bytes, request),
+        }
+    }
+
+    fn persist(
+        &mut self,
+        cursor: &Cursor,
+        request: &RequestEnvelope,
+    ) -> Result<(), ProviderFailure> {
+        match self {
+            Self::Observation { .. } => Ok(()),
+            Self::Canonical {
+                root,
+                admission,
+                limits,
+            } => persist(root, admission, *limits, cursor, request),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ReadAccounting {
+    metadata: usize,
+    forward: usize,
+    reconstruction: usize,
+}
+
+impl ReadAccounting {
+    fn total(&self) -> usize {
+        self.metadata + self.forward + self.reconstruction
+    }
+
+    fn warnings(&self, storage: &PageStorage) -> Vec<String> {
+        match storage {
+            PageStorage::Canonical { .. } => Vec::new(),
+            PageStorage::Observation { .. } => vec![format!(
+                "codex_observation_io_v1:forward={};reconstruction={};metadata={}",
+                self.forward, self.reconstruction, self.metadata
+            )],
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct Chunk<'a> {
     #[serde(rename = "type")]
@@ -638,20 +772,21 @@ fn page_result(
     state: &Cursor,
     mut next: Cursor,
     turns: &[Value],
-    examined: usize,
+    examined: &ReadAccounting,
     complete: bool,
+    storage: &PageStorage,
 ) -> (Value, Cursor) {
     next.kind = if complete { "resume" } else { "page" }.into();
     next.page = state.page + 1;
     next.sequence = state.sequence + turns.len() as u64;
-    let next_token = token(&next);
+    let next_token = storage.token(&next);
     (
         json!({"read_protocol":PROTOCOL,"provider_instance_id":state.binding.provider,"settings_id":state.binding.settings,
         "session_id":state.binding.session,"turn_projection":state.binding.projection,"snapshot_id":state.snapshot,
         "page_index":state.page,"page_start_sequence":state.sequence,"turns":turns,"page_turn_count":turns.len(),
-        "source_bytes_examined":examined,"scan_progress":!complete && turns.is_empty() && next.offset > state.offset,
+        "source_bytes_examined":examined.total(),"scan_progress":!complete && turns.is_empty() && next.offset > state.offset,
         "snapshot_complete":complete,"next_page_token":if complete { Value::Null } else { json!(next_token) },
-        "resume_token":if complete { json!(next_token) } else { Value::Null },"source_final":false,"warnings":[]}),
+        "resume_token":if complete { json!(next_token) } else { Value::Null },"source_final":false,"warnings":examined.warnings(storage)}),
         next,
     )
 }
@@ -693,9 +828,6 @@ fn read_turns_with_limits(
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| invalid(request, "provider_instance_id is required"))?;
     let account = crate::session::account_home(request, &p.settings_id)?;
-    let (mut file, metadata_bytes, metadata_end) =
-        crate::session::locate_page_source(&account, &p.session_id, p.max_source_bytes, request)?;
-    let current = stamp(&file, request)?;
     let binding = Binding {
         provider: provider.into(),
         account,
@@ -711,15 +843,35 @@ fn read_turns_with_limits(
         inline: p.max_inline_body_bytes,
     };
     let root = state_root(request)?;
-    let mut admission = StagingAdmission::acquire(&root, request)?;
+    let mut storage = PageStorage::new(root, &p, limits, request)?;
     let old = p
         .page_token
         .as_ref()
         .or(p.after_token.as_ref())
-        .map(|t| load(&root, t, request))
+        .map(|t| storage.load(t, &binding, request))
         .transpose()?;
+    if old.as_ref().is_some_and(|old| old.binding != binding) {
+        return Err(stale(request));
+    }
+    let (mut file, metadata_bytes, metadata_end) = crate::session::locate_page_source(
+        &binding.account,
+        &p.session_id,
+        p.max_source_bytes,
+        old.as_ref().map(|old| (old.stamp.device, old.stamp.inode)),
+        request,
+    )
+    .map_err(|error| {
+        // A bound physical source disappearing/replacing is a stale cursor,
+        // not a fresh session lookup miss. Preserve the existing cursor error.
+        if old.is_some() && error.code == "codex_session_not_found" {
+            stale(request)
+        } else {
+            error
+        }
+    })?;
+    let current = stamp(&file, request)?;
     if let Some(old) = &old {
-        if old.binding != binding || old.offset > current.len {
+        if old.offset > current.len {
             return Err(stale(request));
         }
         require_generation(&old.stamp, &current, request)?;
@@ -757,9 +909,13 @@ fn read_turns_with_limits(
         }
     };
     let mut next = state.clone();
-    let examined;
+    let mut examined = ReadAccounting {
+        metadata: metadata_bytes,
+        ..ReadAccounting::default()
+    };
     let mut turns = Vec::new();
     let mut complete = false;
+    let mut framed_checkpoint = None;
     if p.start_mode == "tail" {
         let start = current
             .len
@@ -771,7 +927,10 @@ fn read_turns_with_limits(
             .take(current.len - start)
             .read_to_end(&mut bytes)
             .map_err(|_| io_error(request))?;
-        examined = metadata_bytes + bytes.len();
+        examined.forward = bytes.len();
+        if bytes.len() as u64 != current.len - start {
+            return Err(stale(request));
+        }
         next.offset = bytes
             .iter()
             .rposition(|b| *b == b'\n')
@@ -785,21 +944,29 @@ fn read_turns_with_limits(
         }
         complete = true;
     } else {
-        file.seek(SeekFrom::Start(state.offset))
-            .map_err(|_| io_error(request))?;
         let maximum =
             (state.stamp.len - state.offset).min((p.max_source_bytes - metadata_bytes) as u64);
-        let mut bytes = partial_bytes(&root, &state, request)?;
+        let mut bytes = storage.prefix(&mut file, &state, request)?;
+        file.seek(SeekFrom::Start(state.offset))
+            .map_err(|_| io_error(request))?;
         let prefix_len = bytes.len();
         let record_start = state.offset - prefix_len as u64;
-        // Native reads retain the old budget, including identity metadata.
-        // Staging reads are separately bounded by MAX_RECORD_BYTES.
+        // The forward quantum still includes metadata. Only observation may
+        // reconstruct a prefix from native source under a separate record bound.
+        if matches!(storage, PageStorage::Observation { .. }) {
+            examined.reconstruction = prefix_len;
+        }
         (&mut file)
             .take(maximum.min((MAX_RECORD_BYTES - prefix_len) as u64))
             .read_to_end(&mut bytes)
             .map_err(|_| io_error(request))?;
         let native_read = bytes.len() - prefix_len;
-        examined = metadata_bytes + native_read;
+        examined.forward = native_read;
+        if matches!(storage, PageStorage::Observation { .. })
+            && native_read as u64 != maximum.min((MAX_RECORD_BYTES - prefix_len) as u64)
+        {
+            return Err(stale(request));
+        }
         let mut consumed = 0;
         for line in bytes.split_inclusive(|b| *b == b'\n') {
             if !line.ends_with(b"\n") {
@@ -837,8 +1004,9 @@ fn read_turns_with_limits(
                     &state,
                     candidate.clone(),
                     &turns,
-                    examined,
+                    &examined,
                     proposed_offset == state.stamp.len,
+                    &storage,
                 );
                 if !fits(&result, &p, request) {
                     if turn["body_state"] == "inline" {
@@ -850,8 +1018,9 @@ fn read_turns_with_limits(
                         &state,
                         candidate,
                         &turns,
-                        examined,
+                        &examined,
                         proposed_offset == state.stamp.len,
+                        &storage,
                     );
                     if !fits(&result, &p, request) {
                         turns.pop();
@@ -875,15 +1044,12 @@ fn read_turns_with_limits(
         // Only an unframed suffix can be staged. If a turn/response limit
         // stopped us before a newline, leave that entire record for replay.
         if consumed < bytes.len() && !bytes[consumed..].contains(&b'\n') {
+            if consumed > 0 {
+                framed_checkpoint = Some(next.clone());
+            }
             let suffix = &bytes[consumed..];
-            next.partial_record = Some(stage_partial(
-                &root,
-                &mut admission,
-                limits,
-                record_start + consumed as u64,
-                suffix,
-                request,
-            )?);
+            next.partial_record =
+                Some(storage.stage(record_start + consumed as u64, suffix, request)?);
             next.offset = record_start + bytes.len() as u64;
             // EOF coverage does not project an unfinished record. Resume keeps
             // its immutable prefix, and append supplies the missing suffix.
@@ -897,14 +1063,37 @@ fn read_turns_with_limits(
         }
     }
     require_generation(&current, &stamp(&file, request)?, request)?;
-    let (result, cursor) = page_result(&state, next, &turns, examined, complete);
+    let (mut result, mut cursor) =
+        page_result(&state, next.clone(), &turns, &examined, complete, &storage);
+    // The observation token grows when a later unframed suffix is retained.
+    // Fit the final cursor, not just each provisional complete-record candidate.
+    // Keep every turn and its digests; omit inline bodies only as needed.
+    for index in (0..turns.len()).rev() {
+        if fits(&result, &p, request) {
+            break;
+        }
+        if turns[index]["body_state"] == "inline" {
+            turns[index]["body_state"] = json!("omitted_oversize");
+            turns[index]["body"] = Value::Null;
+            (result, cursor) =
+                page_result(&state, next.clone(), &turns, &examined, complete, &storage);
+        }
+    }
+    if !fits(&result, &p, request) {
+        if let Some(checkpoint) = framed_checkpoint {
+            // A metadata-only page may fit at the preceding complete boundary
+            // but not with the larger prefix token. Publish that real progress;
+            // leave the unfinished suffix for replay, charging all reads now.
+            (result, cursor) = page_result(&state, checkpoint, &turns, &examined, false, &storage);
+        }
+    }
     if !fits(&result, &p, request) {
         return Err(capacity(
             request,
             "Response budget cannot hold paging metadata",
         ));
     }
-    persist(&root, &mut admission, limits, &cursor, request)?;
+    storage.persist(&cursor, request)?;
     Ok(result)
 }
 
@@ -1075,6 +1264,29 @@ mod admission_tests {
     }
 
     #[test]
+    fn observation_bypasses_exhausted_object_and_byte_admission_without_mutating_it() {
+        let (_tmp, req, path) = fixture();
+        let canonical = read_turns_with_limits(&req, (16384, 2)).unwrap();
+        let root = state_root(&req).unwrap();
+        let before = files(&root);
+        let native = fs::read(&path).unwrap();
+        let mut observation = req.clone();
+        observation.params["turn_projection"] = json!("user_observation");
+        observation.params["expected_delivery_nonce"] = json!("a".repeat(64));
+        let page = read_turns_with_limits(&observation, (0, 0)).unwrap();
+        assert_eq!(page["scan_progress"], true);
+        assert_eq!(page, read_turns_with_limits(&observation, (0, 0)).unwrap());
+        observation.params["start_mode"] = json!("tail");
+        assert_eq!(
+            read_turns_with_limits(&observation, (0, 0)).unwrap()["turns"],
+            json!([])
+        );
+        assert_eq!(files(&root), before);
+        assert_eq!(read_turns_with_limits(&req, (0, 0)).unwrap(), canonical);
+        assert_eq!(fs::read(path).unwrap(), native);
+    }
+
+    #[test]
     fn failed_cursor_publication_leaves_only_admitted_recoverable_prefix() {
         let (_tmp, req, _) = fixture();
         assert_eq!(
@@ -1218,15 +1430,26 @@ mod admission_tests {
         req.params["start_mode"] = json!("tail");
         let anchor = read_turns_with_limits(&req, STAGING_LIMITS).unwrap();
         let root = state_root(&req).unwrap();
-        let old_token = anchor["resume_token"].as_str().unwrap();
-        let state = load(&root, old_token, &req).unwrap();
+        let storage =
+            PageStorage::new(root.clone(), &params(&req).unwrap(), STAGING_LIMITS, &req).unwrap();
+        let binding = Binding {
+            provider: "codex-provider".into(),
+            account: crate::session::account_home(&req, "codex").unwrap(),
+            settings: "codex".into(),
+            session: "test-session".into(),
+            projection: "user_observation".into(),
+            nonce: Some("a".repeat(64)),
+        };
+        let state = storage
+            .load(anchor["resume_token"].as_str().unwrap(), &binding, &req)
+            .unwrap();
+        let old_token = token(&state);
         // Synthetic pre-upgrade layout, not a migration or production copy.
         fs::write(
             root.join(format!("{}.json", &old_token[PREFIX.len()..])),
             serde_json::to_vec(&state).unwrap(),
         )
         .unwrap();
-        fs::remove_file(pack_path(&root, &old_token[PREFIX.len()..])).unwrap();
         let mut tokens = vec![old_token.to_owned()];
         for i in 0..4463 {
             let mut cursor = seed_cursor();
@@ -1271,8 +1494,13 @@ mod admission_tests {
                 completed = true;
                 break;
             }
-            let cursor = load(&root, page["next_page_token"].as_str().unwrap(), &req).unwrap();
-            assert!(!partial_bytes(&root, &cursor, &req).unwrap().is_empty());
+            let mut binding = binding.clone();
+            binding.nonce = Some("b".repeat(64));
+            let cursor = storage
+                .load(page["next_page_token"].as_str().unwrap(), &binding, &req)
+                .unwrap();
+            let mut file = File::open(&native).unwrap();
+            assert!(!storage.prefix(&mut file, &cursor, &req).unwrap().is_empty());
             req.params["start_mode"] = json!("continuation");
             req.params["after_token"] = Value::Null;
             req.params["snapshot_id"] = page["snapshot_id"].clone();
@@ -1293,25 +1521,35 @@ mod admission_tests {
     }
 
     #[test]
-    fn observation_churn_bounds_cursor_objects_and_charges_retained_history() {
-        let (_tmp, mut req, _) = fixture();
-        req.params["turn_projection"] = json!("user_observation");
-        req.params["start_mode"] = json!("tail");
+    fn canonical_churn_bounds_cursor_objects_and_charges_retained_history() {
+        let (_tmp, req, native) = fixture();
+        let root = state_root(&req).unwrap();
         let mut tokens = Vec::new();
+        // Exercise the canonical publisher with distinct bound cursor states.
+        let page = read_turns_with_limits(&req, STAGING_LIMITS).unwrap();
+        let mut cursor = load(&root, page["next_page_token"].as_str().unwrap(), &req).unwrap();
+        let mut guard = StagingAdmission::acquire(&root, &req).unwrap();
         for i in 0..1024 {
-            req.params["expected_delivery_nonce"] = json!(format!("{i:064x}"));
-            let page = read_turns_with_limits(&req, STAGING_LIMITS).unwrap();
-            tokens.push(page["resume_token"].as_str().unwrap().to_owned());
+            cursor.sequence = i;
+            persist(&root, &mut guard, STAGING_LIMITS, &cursor, &req).unwrap();
+            tokens.push(token(&cursor));
         }
+        drop(guard);
+        assert!(native.exists());
         let root = state_root(&req).unwrap();
         let retained = files(&root);
-        assert!(retained.len() <= 256);
-        assert!(retained
-            .iter()
-            .all(|(path, _)| path.extension().unwrap() == "pack"));
+        assert!(retained.len() <= 257);
         assert_eq!(
             retained
                 .iter()
+                .filter(|(p, _)| p.extension().unwrap() == "part")
+                .count(),
+            1
+        );
+        assert_eq!(
+            retained
+                .iter()
+                .filter(|(path, _)| path.extension().unwrap() == "pack")
                 .map(|(_, bytes)| bytes.iter().filter(|b| **b == b'\n').count())
                 .sum::<usize>(),
             1024
@@ -1325,7 +1563,7 @@ mod admission_tests {
             assert_eq!(token, super::token(&load(&root, &token, &req).unwrap()));
         }
         let page = read_turns_with_limits(&req, (0, 0)).unwrap();
-        assert!(page["resume_token"].is_string());
+        assert!(page["next_page_token"].is_string());
         assert_eq!(files(&root), retained);
         let mut guard = StagingAdmission::acquire(&root, &req).unwrap();
         assert!(guard
@@ -1335,6 +1573,73 @@ mod admission_tests {
             .reserve_growth(&root, 0, 0, (charged, STAGING_LIMITS.1), &req)
             .unwrap();
         assert_eq!(guard.bytes, charged);
+    }
+
+    #[test]
+    fn observation_churn_has_one_key_no_retained_pool_and_replays_old_nonces() {
+        let (_tmp, mut req, _) = fixture();
+        req.params["turn_projection"] = json!("user_observation");
+        req.params["start_mode"] = json!("tail");
+        let mut pages = Vec::new();
+        for i in 0..1024 {
+            req.params["expected_delivery_nonce"] = json!(format!("{i:064x}"));
+            pages.push(read_turns_with_limits(&req, (0, 0)).unwrap());
+        }
+        let root = state_root(&req).unwrap();
+        assert!(files(&root).is_empty());
+        let auth = root.parent().unwrap().join("observation-auth-v1");
+        let authority = files(&auth);
+        assert_eq!(authority.len(), 1);
+        assert_eq!(authority[0].1.len(), 32);
+        for (i, page) in pages.iter().enumerate() {
+            req.params["expected_delivery_nonce"] = json!(format!("{i:064x}"));
+            assert_eq!(&read_turns_with_limits(&req, (0, 0)).unwrap(), page);
+            req.params["start_mode"] = json!("beginning");
+            req.params["after_token"] = page["resume_token"].clone();
+            assert_eq!(
+                read_turns_with_limits(&req, (0, 0)).unwrap()["snapshot_complete"],
+                true
+            );
+            req.params["start_mode"] = json!("tail");
+            req.params["after_token"] = Value::Null;
+        }
+        assert_eq!(files(&auth), authority);
+        assert!(files(&root).is_empty());
+    }
+
+    #[test]
+    fn packed_observation_load_waits_for_canonical_publication_lock() {
+        let (_tmp, mut req, _) = fixture();
+        req.params["turn_projection"] = json!("user_observation");
+        req.params["expected_delivery_nonce"] = json!("a".repeat(64));
+        let root = state_root(&req).unwrap();
+        let mut cursor = seed_cursor();
+        cursor.binding.projection = "user_observation".into();
+        cursor.binding.nonce = Some("a".repeat(64));
+        let mut guard = StagingAdmission::acquire(&root, &req).unwrap();
+        persist(&root, &mut guard, STAGING_LIMITS, &cursor, &req).unwrap();
+        let value = token(&cursor);
+        let binding = cursor.binding.clone();
+        let storage = PageStorage::new(root, &params(&req).unwrap(), (0, 0), &req).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let child = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let loaded = storage.load(&value, &binding, &req).unwrap();
+            done_tx.send(token(&loaded)).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let before_release = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop(guard);
+        let after_release = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        child.join().unwrap();
+        assert!(matches!(
+            before_release,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(after_release.unwrap(), token(&cursor));
     }
 
     fn same_bucket_pair() -> (Cursor, Cursor) {
