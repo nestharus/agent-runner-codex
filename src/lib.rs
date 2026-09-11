@@ -10,6 +10,7 @@ pub mod models;
 mod native_process;
 pub mod policy;
 pub mod quota;
+mod registration;
 pub mod session;
 mod session_turn_pages;
 pub mod terminal;

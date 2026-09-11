@@ -554,6 +554,7 @@ fn headless_child_drops_inherited_tui_mode_and_uses_its_private_identity_file() 
         r#"sys.stdin.read()
 assert 'AGENT_RUNNER_CODEX_INTERACTIVE' not in os.environ
 assert 'AGENT_RUNNER_CODEX_SESSION_BINDING' not in os.environ
+assert 'AGENT_RUNNER_CODEX_REGISTRATION_CWD' not in os.environ
 assert 'AGENT_RUNNER_CODEX_SESSION_ID' not in os.environ
 assert os.environ['AGENT_RUNNER_CODEX_SESSION_FILE'] != '/stale/parent/session'
 print(json.dumps({'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'}),flush=True)
@@ -564,6 +565,7 @@ print(json.dumps({'type':'turn.completed'}),flush=True)"#,
     for key in [
         "AGENT_RUNNER_CODEX_INTERACTIVE",
         "AGENT_RUNNER_CODEX_SESSION_BINDING",
+        "AGENT_RUNNER_CODEX_REGISTRATION_CWD",
     ] {
         request["host"]["env"][key] = json!("stale-tui-mode");
     }
@@ -571,6 +573,7 @@ print(json.dumps({'type':'turn.completed'}),flush=True)"#,
         .arg("launch")
         .env("AGENT_RUNNER_CODEX_INTERACTIVE", "1")
         .env("AGENT_RUNNER_CODEX_SESSION_BINDING", "tool_metadata")
+        .env("AGENT_RUNNER_CODEX_REGISTRATION_CWD", "/parent-workspace")
         .env(
             "AGENT_RUNNER_CODEX_SESSION_ID",
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",

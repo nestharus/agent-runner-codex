@@ -102,7 +102,10 @@ fn isolated_home(account_home: &std::path::Path) -> Result<PathBuf, ProviderFail
             .map_err(|_| invalid("Cannot initialize isolated Codex configuration"))?;
         // Native SQLite stores absolute rollout paths through this home. Keep
         // the tiny profile directory so future resumes can resolve those paths.
-        Ok(home.keep())
+        // Native resolves CODEX_HOME before assigning User-layer hook keys.
+        // Bind declarations to the physical selected home, including symlinked accounts.
+        std::fs::canonicalize(home.keep())
+            .map_err(|_| invalid("Cannot resolve the physical managed Codex configuration home"))
     }
     #[cfg(not(unix))]
     {
@@ -182,8 +185,7 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
         }
     }
     let plan = policy::plan(&request, true)?;
-    let config = RuntimeConfig::load(&request.host)?;
-    config.validate()?;
+    let mut config = RuntimeConfig::load(&request.host)?;
     let account_home = account::home(&request.host, settings_id)?;
     if let Some(session) = options.resume.as_deref() {
         if !launch::valid_thread_id(session) {
@@ -221,6 +223,23 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
         "tool_metadata".into(),
     );
     env.insert("AGENT_RUNNER_CODEX_INTERACTIVE".into(), "1".into());
+    let invocation = env
+        .get("OULIPOLY_PARENT_INVOCATION")
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok());
+    if !invocation
+        .as_ref()
+        .and_then(|v| v["id"].as_str())
+        .is_some_and(launch::valid_thread_id)
+        || !env
+            .get("OULIPOLY_LIVE_SESSION_BIND_SOCKET")
+            .is_some_and(|v| std::path::Path::new(v).is_absolute())
+        || !env
+            .get("OULIPOLY_LIVE_SESSION_BIND_TOKEN")
+            .is_some_and(|v| !v.is_empty())
+    {
+        return Err(invalid("Interactive registration requires authenticated Agent Runner launch authority; start this session through Agent Runner"));
+    }
+
     // Inherited parent identity is never evidence for this newly created TUI.
     for key in [
         "AGENT_RUNNER_CODEX_SESSION_FILE",
@@ -233,14 +252,28 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
     if let Some(id) = options.resume.as_deref() {
         env.insert("AGENT_RUNNER_CODEX_SESSION_ID".into(), id.into());
     }
-    launch::verify_version(&config, &env, &request)?;
     let home = isolated_home(&account_home)?;
+    crate::registration::stage(&mut config, &config_root, &home)?;
+    config.validate()?;
+    launch::verify_version(&config, &env, &request)?;
+    crate::registration::declaration(&home, &config)?;
+    env.insert(
+        "AGENT_RUNNER_CODEX_REGISTRATION_CWD".into(),
+        cwd.display().to_string(),
+    );
     env.insert("CODEX_HOME".into(), home.display().to_string());
     env.insert(
         "CODEX_SQLITE_HOME".into(),
         account_home.display().to_string(),
     );
     let mut native_args = launch::managed_native_args(&config, &plan, &env);
+    // Only registration-enabled TUI permits native hooks. All other disabled
+    // features remain unchanged; system/managed hooks are explicitly authorized.
+    for arg in &mut native_args {
+        if arg == "features.hooks=false" {
+            *arg = "features.hooks=true".into();
+        }
+    }
     // TUI does not expose exec's --ignore-user-config/--ignore-rules. The
     // isolated home removes the user layer; explicit untrusted cwd disables
     // project layers without a trust prompt (pinned tui/src/lib.rs tests).
@@ -254,6 +287,9 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
     ] {
         native_args.extend(["-c".into(), setting]);
     }
+    // These are provider-owned integration inputs, not effective native policy.
+    // Native resolves system/managed/cloud policy during its one normal startup;
+    // never start a disposable native runtime to inspect policy ahead of exec.
     if let Some(id) = options.resume {
         native_args.extend(["resume".into(), id]);
     }
@@ -276,7 +312,7 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
 
 pub fn run(args: &[String]) -> i32 {
     if args == ["--help"] || args == ["-h"] {
-        println!("agent-runner-codex interactive --settings-id ACCOUNT [--config-root PATH] [--model LABEL] [--resume UUID] [--prompt TEXT]\n\nManaged Codex TUI with Agent Bash. The default model is gpt-xhigh.\nExact legacy -m MODEL -c 'model_reasoning_effort=\"EFFORT\"' selection is also supported.");
+        println!("agent-runner-codex interactive --settings-id ACCOUNT [--config-root PATH] [--model LABEL] [--resume UUID] [--prompt TEXT]\n\nManaged Codex TUI with Agent Bash. The default model is gpt-xhigh.\nIntegration validation covers staged payloads and emitted settings, not permission under native effective policy. Native Codex enforces system/managed/cloud policy at startup; hooks may be excluded or settings redirected. Missing exact registration remains an error. Check native policy with its administrator rather than changing trust to bypass it.\nExact legacy -m MODEL -c 'model_reasoning_effort=\"EFFORT\"' selection is also supported.");
         return 0;
     }
     let mut command = match prepare(args) {

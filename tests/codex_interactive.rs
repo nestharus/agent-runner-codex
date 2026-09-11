@@ -24,17 +24,32 @@ impl Fixture {
         let native = r.join("native");
         fs::write(&native, r#"#!/usr/bin/env python3
 import os,sys,json
+with open(os.environ['CALLS']+'.all','a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['--version']:
  print('codex-cli 0.153.4');sys.exit(0)
+if sys.argv[1:2] in [['app-server'], ['features'], ['doctor'], ['debug']]:
+ sys.exit(93) # No extra config/runtime startup is part of interactive preparation.
 with open(os.environ['CALLS'],'w') as f:
  json.dump({'pid':os.getpid(),'argv':sys.argv[1:],'home':os.environ['CODEX_HOME'],'mode':os.environ.get('AGENT_RUNNER_CODEX_INTERACTIVE'),'binding':os.environ.get('AGENT_RUNNER_CODEX_SESSION_BINDING'),'id':os.environ.get('AGENT_RUNNER_CODEX_SESSION_ID'),'file':os.environ.get('AGENT_RUNNER_CODEX_SESSION_FILE'),'parent_thread':os.environ.get('CODEX_THREAD_ID'),'instructions':os.environ.get('AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS'),'sentinel':os.environ.get('SENTINEL')},f)
 "#).unwrap();
         fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
         for file in ["bun", "agent-bash", "agents", "mcp.ts"] {
             fs::write(r.join(file), "fixture").unwrap();
+            fs::set_permissions(r.join(file), fs::Permissions::from_mode(0o700)).unwrap();
         }
         fs::write(
             r.join("models.json"),
+            include_str!("../integrations/codex/models.json"),
+        )
+        .unwrap();
+        fs::create_dir_all(r.join("config/agent-runner-codex/integrations/codex")).unwrap();
+        fs::write(
+            r.join("config/agent-runner-codex/integrations/codex/agent-bash-mcp.ts"),
+            "fixture",
+        )
+        .unwrap();
+        fs::write(
+            r.join("config/agent-runner-codex/integrations/codex/models.json"),
             include_str!("../integrations/codex/models.json"),
         )
         .unwrap();
@@ -44,7 +59,10 @@ with open(os.environ['CALLS'],'w') as f:
             ("bun_bin", "bun"),
             ("agent_bash_bin", "agent-bash"),
             ("agent_runner_bin", "agents"),
-            ("bash_mcp_path", "mcp.ts"),
+            (
+                "bash_mcp_path",
+                "config/agent-runner-codex/integrations/codex/agent-bash-mcp.ts",
+            ),
             ("system_prompt_file", "prompt.md"),
         ];
         fs::write(
@@ -67,6 +85,18 @@ with open(os.environ['CALLS'],'w') as f:
             .arg(self.root.path().join("config"))
             .env("HOME", self.root.path())
             .env("CALLS", self.root.path().join("calls.json"))
+            .env(
+                "OULIPOLY_PARENT_INVOCATION",
+                r#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#,
+            )
+            .env(
+                "OULIPOLY_LIVE_SESSION_BIND_SOCKET",
+                self.root.path().join("bind.sock"),
+            )
+            .env(
+                "OULIPOLY_LIVE_SESSION_BIND_TOKEN",
+                "synthetic-fixture-token",
+            )
             .env("SENTINEL", "inherited")
             .env("CODEX_THREAD_ID", "wrong-parent")
             .env("AGENT_RUNNER_CODEX_SESSION_ID", "wrong-parent")
@@ -134,7 +164,16 @@ fn luna_terra_and_sol_interactive_routes_preserve_every_effort_and_account() {
                     assert!(argv.iter().any(|value| value
                         .as_str()
                         .is_some_and(|value| value.starts_with("model_instructions_file="))));
-                    calls.push(argv.clone());
+                    calls.push(
+                        argv.iter()
+                            .map(|arg| {
+                                json!(arg
+                                    .as_str()
+                                    .unwrap()
+                                    .replace(call["home"].as_str().unwrap(), "<launch-home>"))
+                            })
+                            .collect::<Vec<_>>(),
+                    );
                 }
                 assert_eq!(calls[0], calls[1]);
             }
@@ -153,6 +192,12 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
     let pid = child.id();
     assert!(child.wait().unwrap().success());
     let call = f.call();
+    let calls: Vec<Value> = fs::read_to_string(f.root.path().join("calls.json.all"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(calls, vec![json!(["--version"]), call["argv"].clone()]);
     assert_eq!(call["pid"], pid);
     let home = Path::new(call["home"].as_str().unwrap());
     assert!(home.starts_with(f.root.path().join(".codex3/agent-runner-managed/tui")));
@@ -388,6 +433,8 @@ fn help_never_requires_configuration_or_reads_terminal_input() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("agent-runner-codex interactive"));
     assert!(text.contains("--settings-id") && text.contains("--resume"));
+    assert!(text.contains("not permission under native effective policy"));
+    assert!(text.contains("hooks may be excluded or settings redirected"));
 }
 
 #[test]
