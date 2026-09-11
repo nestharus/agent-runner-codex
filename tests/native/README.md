@@ -55,3 +55,29 @@ remote-control-disabled startup marker so persisted remote control cannot accept
 model work during the probe. Normal native initialization/recovery effects still
 require a consuming-workflow decision before delivery. No private native loader
 fixture result is evidence that this app-server initialization is harmless.
+
+## Configuration-only library alternative (not production admission)
+
+```sh
+timeout 45 python3 tests/native/test_config_only.py \
+  --native-probe /private/planning/age356-native-probe/target/debug/age356-native-probe -v
+```
+
+The harness's `config-only` mode exits after the actual native layer loader,
+typed conversion and exact-requirement application, before constructing hooks.
+Three private fixtures discriminate CLI settings from real managed redirection,
+show system instruction paths and distinct managed feature requirements, and
+compare fixture file names, modes and bytes before/after (including deliberately
+invalid database sentinels). No fake app-server echo participates. These are
+library-boundary experiments, not an execution of provider compatibility checks,
+SQLite recovery/backfill, the native CLI, or a production-safe isolated server.
+File snapshots do not detect transient writes or prove absence of reads; the
+no-datastore-startup claim additionally rests on the harness call graph.
+
+The mode uses test-only local policy paths and the default empty cloud loader.
+It cannot be installed as the compatibility implementation without separately
+preserving actual system/managed/cloud policy acquisition and native-version
+coherence. Native `features list` omits owned settings and hook requirements;
+`doctor` additionally initializes auth and runs runtime/reachability checks.
+The existing production app-server preflight remains rejected, not approved by
+these tests. Its removal/replacement is still blocked on that integration choice.

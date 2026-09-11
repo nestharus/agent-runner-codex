@@ -142,8 +142,13 @@ runtime or a new shared-runtime optimization. Its transport is explicitly stdio
 and native ephemeral remote-control startup is disabled. **Config-only requests
 do not make native startup read-only:** the pinned server initializes its configured
 SQLite store and may perform native corruption recovery before answering. This
-extra initialization against account storage needs consuming-workflow disposition
-before delivery; it has not been executed against production state here.
+extra initialization against account storage is **rejected for delivery**: managed
+requirements can redirect the store before validation, and the 15-second probe can
+interrupt native backfill with a 900-second lease. The current implementation is
+not corrected or delivery-ready. The configuration-only library experiment in
+`tests/native/test_config_only.py` is not a production replacement: it omits cloud
+auth/transport and uses fixture policy paths. A complete replacement remains an
+unresolved native capability/integration decision. No production state was tested.
 
 SessionStart runs on the **first submitted turn**, not on opening an empty TUI.
 UserPromptSubmit repeats the exact check because native consumes SessionStart even

@@ -194,6 +194,20 @@ async fn main() -> anyhow::Result<()> {
         "sqlite_home":typed_json["sqlite_home"],
         "cli_auth_credentials_store":typed_json["cli_auth_credentials_store"],
     });
+    // A library-only alternative, NOT the production app-server preflight.
+    // Return before hook construction/execution and without native Core, auth,
+    // cloud transport, or SQLite runtime startup. Fixture policy sources only.
+    if args[4] == "config-only" {
+        println!("{}", json!({
+            "effective_owned_settings": effective_owned_settings,
+            "effective_features": effective_features,
+            "requirements": {
+                "allow_managed_hooks_only": stack.requirements_toml().allow_managed_hooks_only,
+                "features": stack.requirements_toml().feature_requirements.as_ref().map(|f| &f.entries),
+            },
+        }));
+        return Ok(());
+    }
     let config = HooksConfig {
         feature_enabled: args[4] != "off",
         config_layer_stack: Some(stack.clone()),
