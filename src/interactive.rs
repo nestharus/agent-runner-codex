@@ -287,7 +287,9 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
     ] {
         native_args.extend(["-c".into(), setting]);
     }
-    crate::registration_compatibility::check(&config, &env, &cwd, &native_args)?;
+    // These are provider-owned integration inputs, not effective native policy.
+    // Native resolves system/managed/cloud policy during its one normal startup;
+    // never start a disposable native runtime to inspect policy ahead of exec.
     if let Some(id) = options.resume {
         native_args.extend(["resume".into(), id]);
     }
@@ -310,7 +312,7 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
 
 pub fn run(args: &[String]) -> i32 {
     if args == ["--help"] || args == ["-h"] {
-        println!("agent-runner-codex interactive --settings-id ACCOUNT [--config-root PATH] [--model LABEL] [--resume UUID] [--prompt TEXT]\n\nManaged Codex TUI with Agent Bash. The default model is gpt-xhigh.\nExact legacy -m MODEL -c 'model_reasoning_effort=\"EFFORT\"' selection is also supported.");
+        println!("agent-runner-codex interactive --settings-id ACCOUNT [--config-root PATH] [--model LABEL] [--resume UUID] [--prompt TEXT]\n\nManaged Codex TUI with Agent Bash. The default model is gpt-xhigh.\nIntegration validation covers staged payloads and emitted settings, not permission under native effective policy. Native Codex enforces system/managed/cloud policy at startup; hooks may be excluded or settings redirected. Missing exact registration remains an error. Check native policy with its administrator rather than changing trust to bypass it.\nExact legacy -m MODEL -c 'model_reasoning_effort=\"EFFORT\"' selection is also supported.");
         return 0;
     }
     let mut command = match prepare(args) {

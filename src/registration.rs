@@ -117,7 +117,7 @@ pub(crate) fn declaration(home: &Path, config: &RuntimeConfig) -> Result<(), Pro
         .parent()
         .unwrap()
         .join("session-registration.ts");
-    let stop = r#"{"continue":false,"stopReason":"Codex session registration helper failed; exit and relaunch with Agent Runner"}"#;
+    let stop = r#"{"continue":false,"stopReason":"Codex session registration helper failed; exit and relaunch with Agent Runner. Check integration dependencies and runner diagnostics; integration validation does not establish effective native policy. Ask its administrator about hook exclusions or redirected settings; do not bypass trust."}"#;
     // Preserve empty success stdout and turn helper launch failure into explicit
     // native structured stop. Native timeout/SIGKILL can still bypass this shell.
     let command = format!("if result=$({} --no-install {}); then [ -z \"$result\" ] || printf '%s\\n' \"$result\"; else printf '%s\\n' {}; fi",
@@ -158,6 +158,12 @@ pub(crate) fn declaration(home: &Path, config: &RuntimeConfig) -> Result<(), Pro
     pending
         .persist(home.join("config.toml"))
         .map_err(|_| failure())?;
+    if crate::durable_fs::read_file_bounded(&home.join("config.toml"), text.len())
+        .map_err(|_| failure())?
+        != text.as_bytes()
+    {
+        return Err(failure());
+    }
     Ok(())
 }
 

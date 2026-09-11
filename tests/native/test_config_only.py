@@ -65,7 +65,7 @@ class ConfigOnlyTests(unittest.TestCase):
         self.assertEqual(result['effective_owned_settings']['sqlite_home'], str(redirected))
         self.assertTrue(result['requirements']['allow_managed_hooks_only'])
         # Unlike fake echo tests, the real native requirements application changed
-        # the requested path. The preflight could reject here, before DB code.
+        # the requested path. Provider-emitted inputs are not effective policy.
 
     def test_system_config_and_managed_feature_requirements_are_visible(self):
         prompt = self.root / 'system/instructions.md'
@@ -76,7 +76,7 @@ class ConfigOnlyTests(unittest.TestCase):
         result = self.run_loader()
         self.assertEqual(result['effective_owned_settings']['model_instructions_file'], str(prompt))
         # Feature requirements are distinct from typed CLI config, just as in
-        # production admission; checking the effective TOML alone is insufficient.
+        # native enforcement; emitted/typed TOML alone is not execution permission.
         self.assertTrue(result['effective_features']['hooks'])
         self.assertFalse(result['requirements']['features']['hooks'])
 

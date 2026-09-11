@@ -21,23 +21,11 @@ ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 INV = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 NATIVE = r'''#!/usr/bin/python3
 import json,os,sys
+with open(os.environ['CALLS']+'.all','a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['--version']:
  print('codex-cli 0.153.4');sys.exit(0)
-if sys.argv[1:2] == ['app-server']:
- assert os.environ.get('CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED')=='1'
- assert sys.argv[2:4]==['--listen','stdio://']
- features={};owned={}
- for i,a in enumerate(sys.argv):
-  if a=='-c' and sys.argv[i+1].startswith('features.'):
-   key,val=sys.argv[i+1][len('features.'):].split('=',1);features[key]=val=='true'
-  if a=='-c' and sys.argv[i+1].split('=',1)[0] in ['model_instructions_file','model_catalog_json','sqlite_home','cli_auth_credentials_store']:
-   key,val=sys.argv[i+1].split('=',1);owned[key]=json.loads(val)
- for line in sys.stdin:
-  msg=json.loads(line)
-  if 'id' not in msg: continue
-  result={} if msg['id']==1 else {'config':{'features':features,**owned}} if msg['id']==2 else {'requirements':json.loads(os.environ.get('FAKE_REQUIREMENTS','null'))}
-  print(json.dumps({'id':msg['id'],'result':result}),flush=True)
- sys.exit(0)
+if sys.argv[1:2] in [['app-server'], ['features'], ['doctor'], ['debug']]:
+ sys.exit(93) # No extra config/runtime startup is part of interactive preparation.
 with open(os.environ['CALLS'],'w') as f: json.dump({'argv':sys.argv[1:],'env':dict(os.environ)},f)
 '''
 
@@ -130,13 +118,14 @@ class RegistrationTests(unittest.TestCase):
     def test_custom_incoherent_integration_fails_before_native(self):
         p=self.f.root/'custom.ts';p.write_text('do not replace');self.f.paths['bash_mcp_path']=p;self.f.write_config()
         result=self.f.launch();self.assertNotEqual(result.returncode,0);self.assertIn('install-provider.py',result.stderr)
-        self.assertFalse((self.f.root/'calls.json').exists());self.assertEqual(p.read_text(),'do not replace')
+        self.assertFalse((self.f.root/'calls.json.all').exists());self.assertEqual(p.read_text(),'do not replace')
     def test_nonexecutable_dependency_fails_before_native(self):
         self.f.dep.chmod(0o600);self.assertNotEqual(self.f.launch().returncode,0);self.assertFalse((self.f.root/'calls.json').exists())
-    def test_incompatible_managed_requirements_fail_before_native(self):
-        for policy in [{'allowManagedHooksOnly':True},{'featureRequirements':{'hooks':False}},{'featureRequirements':{'shell_tool':True}},{'modelCatalogJson':'/managed/catalog.json'},{'sqliteHome':'/managed/storage'},{'cliAuthCredentialsStore':'keyring'}]:
-            self.f.env['FAKE_REQUIREMENTS']=json.dumps(policy)
-            p=self.f.launch();self.assertNotEqual(p.returncode,0);self.assertIn('administrator',p.stderr);self.assertFalse((self.f.root/'calls.json').exists())
+    def test_one_normal_startup_and_version_only_no_native_config_probe(self):
+        self.launch()
+        calls=[json.loads(line) for line in (self.f.root/'calls.json.all').read_text().splitlines()]
+        self.assertEqual(calls, [['--version'], json.loads(self.f.live['FIXTURE_NATIVE_ARGS'])])
+        self.assertNotIn('CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED',self.f.live)
     def test_missing_runner_authority_fails_before_native(self):
         del self.f.env['OULIPOLY_LIVE_SESSION_BIND_TOKEN']
         self.assertNotEqual(self.f.launch().returncode,0)
@@ -194,8 +183,19 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotEqual(self.f.helper(cwd=self.f.root).returncode,0)
         self.f.rollout(id='dddddddd-dddd-4ddd-8ddd-dddddddddddd')
         self.assertNotEqual(self.f.helper().returncode,0)
+    def test_redirected_metadata_is_not_adopted_or_latest_guessed(self):
+        self.launch()
+        redirected=self.f.root/'redirected-store';redirected.mkdir()
+        (redirected/'rollout.jsonl').write_text(json.dumps({'type':'session_meta','payload':{'id':ID,'cwd':str(self.f.cwd),'timestamp':'2026-09-10T00:00:00Z'}})+'\n')
+        self.f.rollout(id='dddddddd-dddd-4ddd-8ddd-dddddddddddd')
+        self.f.receiver()
+        p=self.f.helper();self.assertNotEqual(p.returncode,0)
+        self.assertIn('no exact authorized acknowledgement',p.stderr)
+        self.assertTrue(self.f.reports)
     def test_refused_socket_never_implies_prior_binding(self):
-        self.launch();self.assertNotEqual(self.f.helper().returncode,0)
+        self.launch();p=self.f.helper();self.assertNotEqual(p.returncode,0)
+        self.assertIn('no exact authorized acknowledgement',p.stderr)
+        self.assertIn('does not establish effective native policy',p.stderr)
     def test_wrong_ack_session_id_is_not_success(self):
         self.launch();self.f.rollout();self.f.receiver({'session_id':'different'})
         self.assertNotEqual(self.f.helper().returncode,0)

@@ -24,23 +24,11 @@ impl Fixture {
         let native = r.join("native");
         fs::write(&native, r#"#!/usr/bin/env python3
 import os,sys,json
+with open(os.environ['CALLS']+'.all','a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['--version']:
  print('codex-cli 0.153.4');sys.exit(0)
-if sys.argv[1:2] == ['app-server']:
- assert os.environ.get('CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED')=='1'
- assert sys.argv[2:4]==['--listen','stdio://']
- features={};owned={}
- for i,a in enumerate(sys.argv):
-  if a=='-c' and sys.argv[i+1].startswith('features.'):
-   key,val=sys.argv[i+1][len('features.'):].split('=',1);features[key]=val=='true'
-  if a=='-c' and sys.argv[i+1].split('=',1)[0] in ['model_instructions_file','model_catalog_json','sqlite_home','cli_auth_credentials_store']:
-   key,val=sys.argv[i+1].split('=',1);owned[key]=json.loads(val)
- for line in sys.stdin:
-  msg=json.loads(line)
-  if 'id' not in msg: continue
-  result={} if msg['id']==1 else {'config':{'features':features,**owned}} if msg['id']==2 else {'requirements':None}
-  print(json.dumps({'id':msg['id'],'result':result}),flush=True)
- sys.exit(0)
+if sys.argv[1:2] in [['app-server'], ['features'], ['doctor'], ['debug']]:
+ sys.exit(93) # No extra config/runtime startup is part of interactive preparation.
 with open(os.environ['CALLS'],'w') as f:
  json.dump({'pid':os.getpid(),'argv':sys.argv[1:],'home':os.environ['CODEX_HOME'],'mode':os.environ.get('AGENT_RUNNER_CODEX_INTERACTIVE'),'binding':os.environ.get('AGENT_RUNNER_CODEX_SESSION_BINDING'),'id':os.environ.get('AGENT_RUNNER_CODEX_SESSION_ID'),'file':os.environ.get('AGENT_RUNNER_CODEX_SESSION_FILE'),'parent_thread':os.environ.get('CODEX_THREAD_ID'),'instructions':os.environ.get('AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS'),'sentinel':os.environ.get('SENTINEL')},f)
 "#).unwrap();
@@ -204,6 +192,12 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
     let pid = child.id();
     assert!(child.wait().unwrap().success());
     let call = f.call();
+    let calls: Vec<Value> = fs::read_to_string(f.root.path().join("calls.json.all"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(calls, vec![json!(["--version"]), call["argv"].clone()]);
     assert_eq!(call["pid"], pid);
     let home = Path::new(call["home"].as_str().unwrap());
     assert!(home.starts_with(f.root.path().join(".codex3/agent-runner-managed/tui")));
@@ -439,6 +433,8 @@ fn help_never_requires_configuration_or_reads_terminal_input() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("agent-runner-codex interactive"));
     assert!(text.contains("--settings-id") && text.contains("--resume"));
+    assert!(text.contains("not permission under native effective policy"));
+    assert!(text.contains("hooks may be excluded or settings redirected"));
 }
 
 #[test]

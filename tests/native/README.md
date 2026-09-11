@@ -37,26 +37,24 @@ exclusion, matching/wrong/old-path trust state, feature-off, managed-only exclus
 authorised system hooks, synchronous no-tool capture/ack, empty successful stdout,
 and structured stop on both initial and subsequent submitted-turn hooks. This
 is not full TUI behavior, deployed executable attestation, a universal stop on
-hook crash/timeout, or proof of every managed/cloud policy path. The provider's
-stdio `config/read`/`configRequirements/read` preflight has deterministic fake-server
-coverage and pinned source schema grounding, not an executed native app-server
-compatibility test here. Source-bound limits must remain visible in handoff.
+hook crash/timeout, or proof of every managed/cloud policy path. Interactive
+preparation does not invoke this harness or a native config/runtime probe. Separate
+fake-executable tests record every invocation and require only `--version` plus
+one normal TUI exec; they do not infer effective policy from emitted settings.
 
 The read-only filesystem fixture is adapted from upstream Apache-2.0 tests;
 see `UPSTREAM-LICENSE`. Native product crates remain external unmodified inputs.
 
-## Preflight process consequence (source evidence, not an executed probe)
+## Removed preflight consequence (preserved source evidence)
 
-Native `app-server/src/lib.rs` initializes SQLite with
-`init_sqlite_state_db_with_fresh_start_on_corruption` before serving config RPCs.
-The provider's config-only preflight therefore is not read-only at process level.
-The provider constrains transport to stdio and applies the pinned native ephemeral
-remote-control-disabled startup marker so persisted remote control cannot accept
-model work during the probe. Normal native initialization/recovery effects still
-require a consuming-workflow decision before delivery. No private native loader
-fixture result is evidence that this app-server initialization is harmless.
+The former app-server preflight initialized SQLite, including conditional recovery
+and backfill, before serving config RPCs. Managed policy could redirect that store;
+the short probe deadline could interrupt a longer backfill lease. That code is now
+removed, not replaced by another startup probe. These observations remain valid
+for the prior implementation. Loader fixtures never proved it harmless. Normal
+native startup and its policy/storage effects remain native-owned.
 
-## Configuration-only library alternative (not production admission)
+## Configuration-only library evidence (not a product obligation)
 
 ```sh
 timeout 45 python3 tests/native/test_config_only.py \
@@ -75,9 +73,7 @@ File snapshots do not detect transient writes or prove absence of reads; the
 no-datastore-startup claim additionally rests on the harness call graph.
 
 The mode uses test-only local policy paths and the default empty cloud loader.
-It cannot be installed as the compatibility implementation without separately
-preserving actual system/managed/cloud policy acquisition and native-version
-coherence. Native `features list` omits owned settings and hook requirements;
-`doctor` additionally initializes auth and runs runtime/reachability checks.
-The existing production app-server preflight remains rejected, not approved by
-these tests. Its removal/replacement is still blocked on that integration choice.
+It is retained only as evidence that real local native requirements can redirect
+settings and exclude hooks; it is not a proposed installed companion, complete
+policy snapshot or provider admission gate. Native system/managed/cloud enforcement
+runs during the normal native startup, not in a new provider policy emulator.

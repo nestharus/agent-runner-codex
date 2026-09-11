@@ -2,7 +2,8 @@
 import { createConnection } from "node:net"
 
 const nativeId = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
-const failure = () => new Error("Codex session registration failed; exit this session and relaunch with Agent Runner")
+const failureMessage = "Codex session registration failed: no exact authorized acknowledgement. Exit and relaunch with Agent Runner; check runner binding diagnostics and selected account metadata/cwd/resume identity. Integration validation does not establish effective native policy: ask its administrator about hook exclusions or redirected settings; do not bypass trust or adopt another store."
+const failure = () => new Error(failureMessage)
 
 export async function registerSession(id: string, cwd: string, timeoutMs = 12000): Promise<void> {
   if (!nativeId.test(id) || cwd !== process.env.AGENT_RUNNER_CODEX_REGISTRATION_CWD) throw failure()
@@ -65,6 +66,6 @@ if (import.meta.main) {
   try { await hook() } catch {
     // Native only honors this structured stop on successful command completion.
     // Crashes/timeouts remain native advisory failures, not guaranteed stops.
-    process.stdout.write(JSON.stringify({ continue: false, stopReason: "Codex session registration failed; exit and relaunch with Agent Runner" }) + "\n")
+    process.stdout.write(JSON.stringify({ continue: false, stopReason: failureMessage }) + "\n")
   }
 }

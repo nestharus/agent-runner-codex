@@ -79,15 +79,15 @@ command arguments. The native thread ID is handed to the tool through a private
 per-invocation session file for headless launches. PTY launches use Codex's
 `tools/call` metadata `_meta.threadId`. PTY identity registration does not require
 Bash: provider-owned global **SessionStart** and **UserPromptSubmit** command
-hooks synchronously send exact native session/cwd metadata through the runner's
-authenticated capture/bind handshake. Capture must validate native rollout
+hooks, when permitted by native policy, synchronously send exact native session/cwd
+metadata through the runner's authenticated capture/bind handshake. Capture must validate native rollout
 materialization, identity, invocation and workspace before acknowledgement. The
 Bash bridge also requires this acknowledgement before any tool operation.
 Neither path guesses the latest transcript.
 
-The provider's `interactive` launcher applies the same managed tool inventory
-and system instructions to PTY sessions. Account `system_prompt_override` is
-read from `providers.toml` and passed as developer instructions. The runner
+The provider's `interactive` launcher emits the same managed tool inventory
+and system instruction inputs for PTY sessions, subject to native effective policy.
+Account `system_prompt_override` is read from `providers.toml` and passed as developer instructions. The runner
 retains terminal rendering, input, process ownership, and notification delivery.
 The Bash bridge preserves interactive delivery and cancellation behavior even
 though MCP itself uses pipes. Sessionless managed PTY launches default to
@@ -100,15 +100,16 @@ Codex's interactive CLI does not support the exec-only user-configuration
 isolation flags. Managed PTY launches therefore use a private configuration
 home under the owning account's `agent-runner-managed/tui/`, with links to its
 existing authentication, sessions, archived sessions, and thread writer locks.
-Native SQLite stays with that account. Credentials are not copied, and token
-refresh writes through to the native auth file. The small configuration homes
-are retained because native SQLite records rollout paths through them.
+The provider requests account-local SQLite and file authentication; native policy
+can redirect those settings. Credentials are not copied, and under the requested
+file-auth layout token refresh writes through to the native auth file. The small
+configuration homes are retained because native SQLite records rollout paths through them.
 Project configuration is excluded from managed launches. Managed PTY support
 currently requires Unix; unsupported platforms are rejected explicitly.
 The tested native account layout uses file authentication and account-local
 SQLite. Custom keyring or storage layouts have not been verified.
 
-### Interactive registration admission and limits
+### Interactive registration integration and native-policy limits
 
 Start managed PTY sessions through Agent Runner; a direct provider launch without
 its authenticated binding environment is rejected. Each launch stages the running
@@ -125,30 +126,34 @@ or broad hook-trust bypass are performed.
 The selected generated `CODEX_HOME/config.toml` declares both synchronous hooks
 and their exact path-qualified native declaration trust hashes. These hashes cover
 normalized declarations, **not helper bytes**; release-payload staging provides
-the separate content check. Only TUI hooks are enabled; unrelated disabled native
-features and headless exec's hooks-disabled policy remain unchanged. Existing
+the separate content check. Only TUI hooks are requested enabled; unrelated
+disabled native features and headless exec's hooks-disabled policy remain unchanged. Existing
 system/managed hooks remain subject to native policy and are explicitly permitted.
 The original account's ordinary user configuration is still excluded by the
 existing isolated-profile policy; this does not import or trust arbitrary user hooks.
 
-Before TUI exec, a bounded disposable native **stdio app-server** performs only
-`initialize`, `config/read` and `configRequirements/read` (no thread, tools or model).
-Admission rejects known managed-only hooks requirements, incompatible feature
-or provider-owned catalog/storage/auth requirements, displaced instruction paths,
-disabled required features, malformed responses or timeout. This is
-a native configuration snapshot, not an exclusive inventory or a guarantee against
-managed policy changes before TUI load. The app-server is not used as the model
-runtime or a new shared-runtime optimization. Its transport is explicitly stdio
-and native ephemeral remote-control startup is disabled. **Config-only requests
-do not make native startup read-only:** the pinned server initializes its configured
-SQLite store and may perform native corruption recovery before answering. This
-extra initialization against account storage is **rejected for delivery**: managed
-requirements can redirect the store before validation, and the 15-second probe can
-interrupt native backfill with a 900-second lease. The current implementation is
-not corrected or delivery-ready. The configuration-only library experiment in
-`tests/native/test_config_only.py` is not a production replacement: it omits cloud
-auth/transport and uses fixture policy paths. A complete replacement remains an
-unresolved native capability/integration decision. No production state was tested.
+Before TUI exec, the provider validates its staged release payload, generated
+hook declarations/trust, emitted configuration inputs and authenticated launch
+authority. **Integration validation is not effective-native-policy admission.**
+There is no disposable app-server or other native configuration/startup probe:
+only the existing pinned `--version` check precedes the one normal native startup.
+Native Codex remains authoritative for system/managed/cloud policy, folder trust
+and hook trust. Policy may disable/exclude the staged hooks or redirect instruction,
+catalog, authentication or storage settings. The provider neither emulates this
+policy nor overrides its requirements. Authorized system hooks remain native-owned.
+
+If no exact authorized callback binds, runner missing-identity errors and receipt
+fences remain in force. Check runner binding diagnostics and selected account
+metadata/cwd/resume identity; ask the native-policy administrator about hook
+exclusions or redirected settings. Do not bypass trust, repair custom configuration,
+or adopt another store to manufacture registration success. These diagnostics do
+not claim to know effective policy. The native loader fixtures document policy
+consequences, not installed product probes or permission to execute.
+
+The removed app-server probe could initialize/recover redirected account stores
+and interrupt backfill before replying. Its source-grounded review evidence remains
+valid for the prior implementation; passing loader fixtures never established
+startup safety. Normal native startup still owns its own storage effects.
 
 SessionStart runs on the **first submitted turn**, not on opening an empty TUI.
 UserPromptSubmit repeats the exact check because native consumes SessionStart even
