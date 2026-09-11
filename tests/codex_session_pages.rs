@@ -1722,3 +1722,178 @@ fn observation_metadata_only_page_keeps_fitting_boundary_and_charges_unused_suff
         sha256_hex("y".repeat(1200).as_bytes())
     );
 }
+
+fn receipt_record(text: &str) -> Value {
+    json!({"timestamp":"2026-09-04T12:00:01Z","type":"response_item","payload":{
+        "type":"message","role":"user","id":"native-item",
+        "content":[{"type":"input_text","text":text}],
+        "internal_chat_message_metadata_passthrough":{
+            "turn_id":"active-runtime-turn","create_time":1788523201,
+            "content_item_kinds":["user.text"]}}})
+}
+
+fn append_record(f: &Fixture, record: &Value) {
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&f.path).unwrap(),
+        "{record}"
+    )
+    .unwrap();
+}
+
+#[test]
+fn age355_receipt_projection_excludes_context_and_nontext_without_changing_ingest() {
+    let f = Fixture::new();
+    let text = format!(
+        "<notification nonce=\"{}\">exact envelope</notification>",
+        "a".repeat(64)
+    );
+    let mut p = observation_params(&f);
+    p["max_source_bytes"] = json!(1048576);
+    p["max_turns"] = json!(256);
+    for kinds in [
+        json!(["compaction.summary"]),
+        json!(["environment_context"]),
+        json!(["user.image"]),
+        json!(["future.unknown"]),
+        json!([]),
+        json!(["user.text", "user.text"]),
+        json!("user.text"),
+        json!([null]),
+    ] {
+        let mut record = receipt_record(&text);
+        record["payload"]["internal_chat_message_metadata_passthrough"]["content_item_kinds"] =
+            kinds;
+        append_record(&f, &record);
+    }
+    for part in [
+        json!({"type":"input_image","image_url":"private-fixture"}),
+        json!({"type":"input_audio","text":""}),
+        json!({"type":"future_text","text":""}),
+        json!({"type":"input_text","text":null}),
+    ] {
+        let mut record = receipt_record(&text);
+        record["payload"]["internal_chat_message_metadata_passthrough"] = Value::Null;
+        record["payload"]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(part);
+        append_record(&f, &record);
+    }
+    let mut malformed = receipt_record(&text);
+    malformed["payload"]["internal_chat_message_metadata_passthrough"] = json!("malformed");
+    append_record(&f, &malformed);
+    for role in ["assistant", "tool", "developer", "system"] {
+        let mut record = receipt_record(&text);
+        record["payload"]["role"] = json!(role);
+        append_record(&f, &record);
+    }
+    append_record(
+        &f,
+        &json!({"type":"compacted","payload":{"replacement_history":[receipt_record(&text)["payload"].clone()]}}),
+    );
+    append_record(
+        &f,
+        &json!({"type":"event_msg","payload":{"type":"user_message","message":text}}),
+    );
+    assert_eq!(f.read(p.clone())["turns"], json!([]));
+    // Generic ingestion retains its old text-projection behavior.
+    let mut canonical = p.clone();
+    canonical["turn_projection"] = json!("canonical_ingest");
+    canonical
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_delivery_nonce");
+    assert!(!f.read(canonical)["turns"].as_array().unwrap().is_empty());
+    for metadata in [
+        Value::Null,
+        json!({"turn_id":"legacy"}),
+        json!({"content_item_kinds":null}),
+        receipt_record(&text)["payload"]["internal_chat_message_metadata_passthrough"].clone(),
+    ] {
+        let mut record = receipt_record(&text);
+        record["payload"]["internal_chat_message_metadata_passthrough"] = metadata;
+        append_record(&f, &record);
+    }
+    let page = f.read(p);
+    assert_eq!(page["page_turn_count"], 4);
+    for turn in page["turns"].as_array().unwrap() {
+        assert_eq!(turn["canonical_text_sha256"], sha256_hex(text.as_bytes()));
+        assert!(turn["parent_turn_id"].is_null());
+        assert!(turn["turn_id"].as_str().unwrap().contains(":byte:"));
+    }
+}
+
+#[test]
+fn age355_exact_envelope_chunks_normalization_and_finite_duplicate_evidence() {
+    let f = Fixture::new();
+    let nonce = "a".repeat(64);
+    let text = format!("notification\nnonce={nonce}\nseq=1,2");
+    let mut p = observation_params(&f);
+    p["max_source_bytes"] = json!(1048576);
+    p["max_turns"] = json!(256);
+    p["start_mode"] = json!("tail");
+    f.append("user", &text); // Exact historical text is outside the anchor.
+    let tail = f.read(p.clone());
+    p["start_mode"] = json!("beginning");
+    p["after_token"] = tail["resume_token"].clone();
+    f.append("user", &format!("quoted {text}"));
+    f.append("user", &text.replace(&nonce, &"b".repeat(64)));
+    f.append(
+        "user",
+        &format!("{text}\n[OULIPOLY-DELIVERY {}]", "b".repeat(64)),
+    );
+    let mut record = receipt_record(&text);
+    record["payload"]["content"] = json!([
+        {"type":"input_text","text":" \r\nnotification\r"},
+        {"type":"output_text","text":format!("\nnonce={nonce}\rseq=1,2\n[OULIPOLY-DELIVERY {nonce}]  ")}
+    ]);
+    record["payload"]["internal_chat_message_metadata_passthrough"]["content_item_kinds"] =
+        json!(["user.text", "user.text"]);
+    append_record(&f, &record);
+    append_record(&f, &record);
+    let page = f.read(p);
+    assert_eq!(page["snapshot_complete"], true);
+    assert_eq!(page["source_final"], false);
+    let matches: Vec<_> = page["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|turn| turn["canonical_text_sha256"] == sha256_hex(text.as_bytes()))
+        .collect();
+    assert_eq!(matches.len(), 2); // Provider exposes duplicates; consumer must not confirm.
+    assert_ne!(matches[0]["turn_id"], matches[1]["turn_id"]);
+}
+
+#[test]
+fn age355_partial_native_receipt_survives_observer_process_restart() {
+    let f = Fixture::new();
+    let text = format!("notification nonce={} seq=1", "a".repeat(64));
+    let mut p = observation_params(&f);
+    p["max_source_bytes"] = json!(1048576);
+    p["start_mode"] = json!("tail");
+    let tail = observation_subprocess(&f, &p);
+    p["start_mode"] = json!("beginning");
+    p["after_token"] = tail["resume_token"].clone();
+    let bytes = serde_json::to_vec(&receipt_record(&text)).unwrap();
+    let split = bytes.len() - 10;
+    let mut file = fs::OpenOptions::new().append(true).open(&f.path).unwrap();
+    file.write_all(&bytes[..split]).unwrap();
+    let partial = observation_subprocess(&f, &p);
+    assert_eq!(partial["snapshot_complete"], true);
+    assert_eq!(partial["turns"], json!([]));
+    p["after_token"] = partial["resume_token"].clone();
+    let unchanged = observation_subprocess(&f, &p);
+    assert_eq!(unchanged["turns"], json!([]));
+    file.write_all(&bytes[split..]).unwrap();
+    assert_eq!(observation_subprocess(&f, &p)["turns"], json!([]));
+    file.write_all(b"\n").unwrap();
+    let complete = observation_subprocess(&f, &p);
+    assert_eq!(complete["page_turn_count"], 1);
+    assert_eq!(complete["snapshot_complete"], true);
+    assert_eq!(complete["source_final"], false);
+    assert_eq!(
+        complete["turns"][0]["canonical_text_sha256"],
+        sha256_hex(text.as_bytes())
+    );
+    assert_eq!(complete, observation_subprocess(&f, &p));
+}

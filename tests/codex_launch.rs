@@ -1497,3 +1497,101 @@ fn cli_launch_preserves_file_offset_and_draining_socket_output() {
     assert_complete_output(&events);
     assert_eq!(output, launch_journal(&f));
 }
+
+#[test]
+fn age355_active_native_receipt_query_does_not_wait_for_assistant_or_exit() {
+    use agent_runner_codex::encoding::sha256_hex;
+    let mut f = Fixture::new();
+    let id = "11111111-2222-3333-4444-555555555555";
+    let nonce = "a".repeat(64);
+    let envelope = format!("<notification nonce=\"{nonce}\" seq=\"1,2\">ready</notification>");
+    f.request["params"]["model"]["inputs"]["prompt"] = json!(envelope);
+    let rollout = f
+        .root
+        .path()
+        .join(format!(".codex2/sessions/rollout-{id}.jsonl"));
+    file(
+        &rollout,
+        &format!(
+            "{}\n",
+            json!({"timestamp":"2026-09-04T12:00:00Z","type":"session_meta","payload":{"id":id,"cwd":"/workspace"}})
+        ),
+    );
+    let mut query = f.request.clone();
+    query["request_id"] = json!("active-receipt-query");
+    query["params"] = json!({"settings_id":"codex2","session_id":id,
+        "read_protocol":"oulipoly.session_turn_pages/v1","turn_projection":"user_observation",
+        "expected_delivery_nonce":nonce,"start_mode":"tail","after_token":null,
+        "snapshot_id":null,"page_token":null,"max_turns":64,"max_response_bytes":131072,
+        "max_source_bytes":524288,"max_inline_body_bytes":0});
+    let (code, tail) = f.invoke("session.read_turns", &query);
+    assert_eq!(code, 0, "{tail:?}");
+    assert_eq!(tail[0]["result"]["turns"], json!([]));
+    query["params"]["start_mode"] = json!("beginning");
+    query["params"]["after_token"] = tail[0]["result"]["resume_token"].clone();
+    fake_native(
+        &f,
+        &format!(
+            r#"
+prompt = sys.stdin.read()
+print(json.dumps({{'type':'thread.started','thread_id':{id:?}}}),flush=True)
+print(json.dumps({{'type':'turn.started'}}),flush=True)
+record = {{'timestamp':'2026-09-04T12:00:01Z','type':'response_item','payload':{{
+ 'type':'message','role':'user','id':'native-user-item',
+ 'content':[{{'type':'input_text','text':prompt}}],
+ 'internal_chat_message_metadata_passthrough':{{'turn_id':'active-turn','content_item_kinds':['user.text']}}}}}}
+with open({rollout:?}, 'a') as history: history.write(json.dumps(record)+'\n')
+open(os.environ['CALLS'],'w').write('recorded')
+deadline = time.monotonic()+10
+while not os.path.exists(os.environ['CALLS']+'.release') and time.monotonic()<deadline:
+ time.sleep(0.01)
+# Receipt must survive a subsequent native failure with no assistant output.
+sys.exit(1)
+"#
+        ),
+    );
+    struct Release(std::path::PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.0, b"release");
+        }
+    }
+    std::thread::scope(|scope| {
+        let launch = scope.spawn(|| f.invoke("launch", &f.request));
+        // Release on assertion unwind too; scope always joins/reaps launch.
+        let release = Release(f.root.path().join("calls.jsonl.release"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !f.root.path().join("calls.jsonl").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(f.root.path().join("calls.jsonl").exists());
+        assert!(!launch.is_finished());
+        let (code, responses) = f.invoke("session.read_turns", &query);
+        assert_eq!(code, 0, "{responses:?}");
+        let page = &responses[0]["result"];
+        assert_eq!(page["snapshot_complete"], true);
+        assert_eq!(page["source_final"], false);
+        assert_eq!(page["page_turn_count"], 1);
+        assert_eq!(page["session_id"], id);
+        assert_eq!(page["provider_instance_id"], "codex2");
+        assert_eq!(page["settings_id"], "codex2");
+        assert_eq!(page["turns"][0]["role"], "user");
+        assert_eq!(page["turns"][0]["body_state"], "omitted_oversize");
+        assert_eq!(
+            page["turns"][0]["canonical_text_sha256"],
+            sha256_hex(envelope.as_bytes())
+        );
+        assert!(
+            !launch.is_finished(),
+            "receipt query terminalized the active launch"
+        );
+        drop(release);
+        let (code, events) = launch.join().unwrap();
+        assert_eq!(code, 1);
+        assert!(!events
+            .iter()
+            .any(|event| event["name"] == "oulipoly.produced_assistant_response"));
+        assert_eq!(events.last().unwrap()["status"]["kind"], "exited");
+        assert_eq!(f.invoke("session.read_turns", &query).1, responses);
+    });
+}

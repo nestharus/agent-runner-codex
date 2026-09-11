@@ -699,6 +699,38 @@ struct Chunk<'a> {
     text: &'a str,
 }
 
+// Observation binds the entire textual input, not a lossy text extraction from
+// a multimodal item. Missing native classifications remain usable under the
+// trusted-writer premise; present classifications must agree with the content.
+// These exclusions are not proof of an exclusive user-input entry point.
+fn observable_user_text(payload: &Value) -> bool {
+    let Some(content) = payload["content"].as_array() else {
+        return false;
+    };
+    if content.is_empty()
+        || !content.iter().all(|part| {
+            matches!(part["type"].as_str(), Some("input_text" | "output_text"))
+                && part["text"].is_string()
+        })
+    {
+        return false;
+    }
+    let metadata = &payload["internal_chat_message_metadata_passthrough"];
+    if metadata.is_null() {
+        return true;
+    }
+    if !metadata.is_object() {
+        return false;
+    }
+    match metadata.get("content_item_kinds") {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(kinds)) => {
+            kinds.len() == content.len() && kinds.iter().all(|kind| kind == "user.text")
+        }
+        Some(_) => false,
+    }
+}
+
 fn project(
     value: &Value,
     p: &Params,
@@ -714,6 +746,9 @@ fn project(
     if !matches!(role, "user" | "assistant")
         || (p.turn_projection == "user_observation" && role != "user")
     {
+        return Ok(None);
+    }
+    if p.turn_projection == "user_observation" && !observable_user_text(payload) {
         return Ok(None);
     }
     let timestamp = value["timestamp"]
