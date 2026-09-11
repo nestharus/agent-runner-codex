@@ -77,9 +77,13 @@ integration tests record the exact source and installed-byte comparison. MCP
 receives inherited environment variable names via `env_vars`, avoiding values in
 command arguments. The native thread ID is handed to the tool through a private
 per-invocation session file for headless launches. PTY launches use Codex's
-`tools/call` metadata `_meta.threadId`; the unchanged Bash override reports that
-identity through the runner's authenticated live-session handshake before
-dispatching work. Neither path guesses the latest transcript.
+`tools/call` metadata `_meta.threadId`. PTY identity registration does not require
+Bash: provider-owned global **SessionStart** and **UserPromptSubmit** command
+hooks synchronously send exact native session/cwd metadata through the runner's
+authenticated capture/bind handshake. Capture must validate native rollout
+materialization, identity, invocation and workspace before acknowledgement. The
+Bash bridge also requires this acknowledgement before any tool operation.
+Neither path guesses the latest transcript.
 
 The provider's `interactive` launcher applies the same managed tool inventory
 and system instructions to PTY sessions. Account `system_prompt_override` is
@@ -103,6 +107,72 @@ Project configuration is excluded from managed launches. Managed PTY support
 currently requires Unix; unsupported platforms are rejected explicitly.
 The tested native account layout uses file authentication and account-local
 SQLite. Custom keyring or storage layouts have not been verified.
+
+### Interactive registration admission and limits
+
+Start managed PTY sessions through Agent Runner; a direct provider launch without
+its authenticated binding environment is rejected. Each launch stages the running
+provider binary's embedded registration helper, MCP bridge, shim, unchanged Bash
+implementation and catalog into its own private generation. Missing/stale default
+installation integration assets are repaired there, **not** rewritten in place.
+Concurrent launches and already-running generations retain their own bytes. Custom
+integration paths are never repaired: they must match this release or fail before
+TUI exec with an explicit `scripts/install-provider.py --binary ...` remedy.
+External executable dependencies must exist, be executable, and not be writable
+by other users. No downloads, native upgrades, global backups, project trust edits,
+or broad hook-trust bypass are performed.
+
+The selected generated `CODEX_HOME/config.toml` declares both synchronous hooks
+and their exact path-qualified native declaration trust hashes. These hashes cover
+normalized declarations, **not helper bytes**; release-payload staging provides
+the separate content check. Only TUI hooks are enabled; unrelated disabled native
+features and headless exec's hooks-disabled policy remain unchanged. Existing
+system/managed hooks remain subject to native policy and are explicitly permitted.
+The original account's ordinary user configuration is still excluded by the
+existing isolated-profile policy; this does not import or trust arbitrary user hooks.
+
+Before TUI exec, a bounded disposable native **stdio app-server** performs only
+`initialize`, `config/read` and `configRequirements/read` (no thread, tools or model).
+Admission rejects known managed-only hooks requirements, incompatible feature
+or provider-owned catalog/storage/auth requirements, displaced instruction paths,
+disabled required features, malformed responses or timeout. This is
+a native configuration snapshot, not an exclusive inventory or a guarantee against
+managed policy changes before TUI load. The app-server is not used as the model
+runtime or a new shared-runtime optimization. Its transport is explicitly stdio
+and native ephemeral remote-control startup is disabled. **Config-only requests
+do not make native startup read-only:** the pinned server initializes its configured
+SQLite store and may perform native corruption recovery before answering. This
+extra initialization against account storage needs consuming-workflow disposition
+before delivery; it has not been executed against production state here.
+
+SessionStart runs on the **first submitted turn**, not on opening an empty TUI.
+UserPromptSubmit repeats the exact check because native consumes SessionStart even
+when it stops a turn: a later submission must not bypass failed registration. The
+runner retains its first successful binding, acknowledges authenticated exact
+duplicates without recapture, and rejects reassignment. This provider requires the
+companion Runner cached-acknowledgement change; deliver the two updates together. Starting a different native
+thread requires a new Runner invocation. Delayed rollout visibility receives
+bounded retries with unchanged capture validation. Successful callbacks produce
+empty stdout; helper failures request native structured `continue:false` stops.
+Native command crashes/timeouts can still be advisory, so this is **not** a universal
+guarantee that model execution stops. Runner missing-identity failure and receipt
+fencing remain final authority. Never-submitted empty TUI exit remains an explicit
+no-bind outcome, not resumable success; no SessionEnd hook is added. Detached-root
+custody is a separate lifecycle concern.
+
+Offline verification:
+
+```sh
+python3 tests/test_session_registration.py --binary target/debug/agent-runner-codex --bun /absolute/path/to/bun
+```
+
+The helper-only suite does not prove native discovery. `tests/native/registration_probe.rs`
+is a separate no-model loader/hook-engine harness against public upstream commit
+`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` (`rust-v0.153.4`). Compile it against those
+unmodified crates and supply `--native-probe /absolute/path/to/age356-native-probe`
+to run actual global/untrusted-project discovery, declaration trust, feature-off,
+managed-only/system-hook, structured-stop and helper-failure fixtures. See
+`tests/native/README.md` for the isolated build recipe and evidence boundaries.
 
 ## Lifecycle and sessions
 

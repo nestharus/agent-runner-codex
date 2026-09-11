@@ -2,17 +2,19 @@
 import { readFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { createRequire } from "node:module"
+import { fileURLToPath } from "node:url"
+import { registerSession } from "./session-registration"
 import type { StringArgument } from "./opencode-tool-shim"
 
 // Do not edit or translate this implementation: keep its bytes equal to OpenCode.
-const overridePath = new URL("../opencode/tools/bash.ts", import.meta.url).pathname
+const overridePath = fileURLToPath(new URL("../opencode/tools/bash.ts", import.meta.url))
 const bundled = await Bun.build({
   entrypoints: [overridePath], target: "node", format: "cjs", write: false,
   plugins: [{
     name: "opencode-tool-registration",
     setup(build) {
       build.onResolve({ filter: /^@opencode-ai\/plugin$/ }, () => ({
-        path: new URL("./opencode-tool-shim.ts", import.meta.url).pathname,
+        path: fileURLToPath(new URL("./opencode-tool-shim.ts", import.meta.url)),
       }))
     },
   }],
@@ -101,6 +103,9 @@ function parseArguments(value: unknown): BashArgs {
 export async function callBash(args: unknown, abort: AbortSignal, metadata?: unknown): Promise<string> {
   const parsed = parseArguments(args)
   const owner = await sessionId(5000, metadata)
+  if (process.env.AGENT_RUNNER_CODEX_REGISTRATION_CWD) {
+    await registerSession(owner, process.cwd())
+  }
   return bash.execute(parsed, { sessionID: owner, abort } as Parameters<typeof bash.execute>[1])
 }
 

@@ -638,6 +638,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     for key in [
         "AGENT_RUNNER_CODEX_INTERACTIVE",
         "AGENT_RUNNER_CODEX_SESSION_BINDING",
+        "AGENT_RUNNER_CODEX_REGISTRATION_CWD",
     ] {
         env.remove(key);
     }
@@ -681,6 +682,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     for key in [
         "AGENT_RUNNER_CODEX_INTERACTIVE",
         "AGENT_RUNNER_CODEX_SESSION_BINDING",
+        "AGENT_RUNNER_CODEX_REGISTRATION_CWD",
         "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS",
     ] {
         gate.command_mut().env_remove(key);

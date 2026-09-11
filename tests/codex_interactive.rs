@@ -26,15 +26,42 @@ impl Fixture {
 import os,sys,json
 if sys.argv[1:] == ['--version']:
  print('codex-cli 0.153.4');sys.exit(0)
+if sys.argv[1:2] == ['app-server']:
+ assert os.environ.get('CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED')=='1'
+ assert sys.argv[2:4]==['--listen','stdio://']
+ features={};owned={}
+ for i,a in enumerate(sys.argv):
+  if a=='-c' and sys.argv[i+1].startswith('features.'):
+   key,val=sys.argv[i+1][len('features.'):].split('=',1);features[key]=val=='true'
+  if a=='-c' and sys.argv[i+1].split('=',1)[0] in ['model_instructions_file','model_catalog_json','sqlite_home','cli_auth_credentials_store']:
+   key,val=sys.argv[i+1].split('=',1);owned[key]=json.loads(val)
+ for line in sys.stdin:
+  msg=json.loads(line)
+  if 'id' not in msg: continue
+  result={} if msg['id']==1 else {'config':{'features':features,**owned}} if msg['id']==2 else {'requirements':None}
+  print(json.dumps({'id':msg['id'],'result':result}),flush=True)
+ sys.exit(0)
 with open(os.environ['CALLS'],'w') as f:
  json.dump({'pid':os.getpid(),'argv':sys.argv[1:],'home':os.environ['CODEX_HOME'],'mode':os.environ.get('AGENT_RUNNER_CODEX_INTERACTIVE'),'binding':os.environ.get('AGENT_RUNNER_CODEX_SESSION_BINDING'),'id':os.environ.get('AGENT_RUNNER_CODEX_SESSION_ID'),'file':os.environ.get('AGENT_RUNNER_CODEX_SESSION_FILE'),'parent_thread':os.environ.get('CODEX_THREAD_ID'),'instructions':os.environ.get('AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS'),'sentinel':os.environ.get('SENTINEL')},f)
 "#).unwrap();
         fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
         for file in ["bun", "agent-bash", "agents", "mcp.ts"] {
             fs::write(r.join(file), "fixture").unwrap();
+            fs::set_permissions(r.join(file), fs::Permissions::from_mode(0o700)).unwrap();
         }
         fs::write(
             r.join("models.json"),
+            include_str!("../integrations/codex/models.json"),
+        )
+        .unwrap();
+        fs::create_dir_all(r.join("config/agent-runner-codex/integrations/codex")).unwrap();
+        fs::write(
+            r.join("config/agent-runner-codex/integrations/codex/agent-bash-mcp.ts"),
+            "fixture",
+        )
+        .unwrap();
+        fs::write(
+            r.join("config/agent-runner-codex/integrations/codex/models.json"),
             include_str!("../integrations/codex/models.json"),
         )
         .unwrap();
@@ -44,7 +71,10 @@ with open(os.environ['CALLS'],'w') as f:
             ("bun_bin", "bun"),
             ("agent_bash_bin", "agent-bash"),
             ("agent_runner_bin", "agents"),
-            ("bash_mcp_path", "mcp.ts"),
+            (
+                "bash_mcp_path",
+                "config/agent-runner-codex/integrations/codex/agent-bash-mcp.ts",
+            ),
             ("system_prompt_file", "prompt.md"),
         ];
         fs::write(
@@ -67,6 +97,18 @@ with open(os.environ['CALLS'],'w') as f:
             .arg(self.root.path().join("config"))
             .env("HOME", self.root.path())
             .env("CALLS", self.root.path().join("calls.json"))
+            .env(
+                "OULIPOLY_PARENT_INVOCATION",
+                r#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#,
+            )
+            .env(
+                "OULIPOLY_LIVE_SESSION_BIND_SOCKET",
+                self.root.path().join("bind.sock"),
+            )
+            .env(
+                "OULIPOLY_LIVE_SESSION_BIND_TOKEN",
+                "synthetic-fixture-token",
+            )
             .env("SENTINEL", "inherited")
             .env("CODEX_THREAD_ID", "wrong-parent")
             .env("AGENT_RUNNER_CODEX_SESSION_ID", "wrong-parent")
@@ -134,7 +176,16 @@ fn luna_terra_and_sol_interactive_routes_preserve_every_effort_and_account() {
                     assert!(argv.iter().any(|value| value
                         .as_str()
                         .is_some_and(|value| value.starts_with("model_instructions_file="))));
-                    calls.push(argv.clone());
+                    calls.push(
+                        argv.iter()
+                            .map(|arg| {
+                                json!(arg
+                                    .as_str()
+                                    .unwrap()
+                                    .replace(call["home"].as_str().unwrap(), "<launch-home>"))
+                            })
+                            .collect::<Vec<_>>(),
+                    );
                 }
                 assert_eq!(calls[0], calls[1]);
             }
