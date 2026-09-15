@@ -72,7 +72,10 @@ contract rather than translating Codex native sub-agent handles.
 `integrations/opencode/tools/bash.ts` is the **unchanged, byte-identical**
 OpenCode Bash override. The Codex MCP adapter imports its actual implementation;
 it does not maintain a second shell implementation. The provenance manifest and
-integration tests record the exact source and installed-byte comparison. MCP
+integration tests record the exact committed source; installed-copy verification
+is false for the retained-output/workdir adapter revision. Terminal results use
+validated snapshots before local receipt, without claiming remote ACK or drain
+(see `integrations/codex/README.md`). MCP
 receives inherited environment variable names via `env_vars`, avoiding values in
 command arguments. The native thread ID is handed to the tool through a private
 per-invocation session file for headless launches. PTY launches use Codex's
@@ -107,6 +110,11 @@ Project configuration is excluded from managed launches. Managed PTY support
 currently requires Unix; unsupported platforms are rejected explicitly.
 The tested native account layout uses file authentication and account-local
 SQLite. Custom keyring or storage layouts have not been verified.
+
+Headless exec selects the configured on-disk MCP bridge and its adjacent Bash
+adapter; it does not use interactive embedded-asset staging. Verify these two
+selectors separately: a staged interactive generation does not identify the
+bytes loaded by a headless launch.
 
 ### Interactive registration integration and native-policy limits
 

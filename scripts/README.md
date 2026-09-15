@@ -197,11 +197,65 @@ checks the managed headless native request against a loopback Responses server.
 Repeat with `gpt-xhigh`, `gpt-max`, and `gpt-astra-xhigh` to cover both Sol and
 Astra routes at their matching native efforts.
 Use `--output-dir /new/evidence/path` to retain isolated configs, request/response
-bodies and raw provider results. `tests/verify_codex_tui_inventory.py --binary
-/exact/provider --no-model --output-dir /tmp/short-new-path` checks the actual
-no-model PTY at Sol/xhigh, including managed tools and native session binding;
-use a short path for its Unix socket. These checks spend no model tokens and
-use new test homes, not native credentials. They do not prove service availability.
+bodies and raw provider results.
+
+The native TUI producer requires explicit dependencies:
+
+```sh
+python3 tests/verify_codex_tui_inventory.py --binary /private/provider \
+  --native-codex /private/native-codex --bun /private/bun \
+  --no-model --output-dir /tmp/short-new-path
+```
+
+Execute native inventory checks only in a private user/network/mount/PID
+namespace, with production HOME/root/run/tmp masked, env-i/private HOME/XDG/CODEX
+state, read-only candidate dependencies and DAC override/readsearch dropped.
+Loopback is not a sandbox. Do not use installed production Codex or Runner.
+The separate headless producer above is not converted into this private harness
+by the TUI corrections; its ambient dependency lookups require separate review
+and adaptation before any isolated execution.
+
+The TUI check observes the no-model PTY at Sol/xhigh, managed tools and native
+session binding; use a short socket path and a new output directory. Its own
+fixture setup provides a fake spooler, fail-closed fake runner, synthetic system
+prompt and non-inherited environment. It checks bounded snapshot acquisition,
+a matching local receipt request and subsequent progression, plus the returned
+body; the fake does not prove durable storage. Session-binding ACK is identity
+ACK, not tool-result consumption. The receiver echoes the existing helper/adapter
+identity contract and allows identical hook/bridge/adapter reports and retries.
+Remote ACK and physical drain remain unconfirmed.
+
+The synthetic suite is also run inside the externally established namespace
+boundary above, not by a standalone Bun-only host command. Its full invocation
+requires both `CODEX_INVENTORY_TEST_BUN` (an absolute private Bun executable) and
+`CODEX_INVENTORY_TEST_PRIVATE_ROOT` (the private harness root). The latter must
+contain the actual `boundary.json` probe report: `masks`, `read_only_inputs` and
+`DAC_denied` are true; `namespaces` records current `user`, `net`, `mnt` and `pid`
+identities from `/proc/self/ns`. The four failure controls compare the recorded
+identities with their own namespace. A report label or executable path alone is
+not isolation; do not fabricate a report or reuse one from another namespace.
+
+Use fresh stage/per-test directories and short Unix socket paths on each run:
+the failure controls create `failure-cases/<test-name digest>` without
+`exist_ok`. The established harness mounts source/dependency inputs read-only,
+binds its private-owned dash read-only over `/bin/sh`, uses namespace PID1
+reaping, runs the boundary probe before enabling private loopback, and supplies
+both variables before invoking `/usr/bin/python3
+/tmp/smoke/codex/tests/test_tui_inventory_producer.py -v`. In that harness the
+variables name `/tmp/smoke/bun` and `/tmp/smoke`, respectively. This describes the
+retained private setup, not a portable wrapper or permission to execute native
+Codex. The suite does not create that boundary itself.
+
+The original six `InventoryProducerTest` tests check the actual bridge with
+synthetic dependencies, including stale-protocol/order/hash/body negative
+controls and receipt failure. The full invocation selects all ten tests: those
+six plus four `InventoryProducerFailureTest` controls of the actual producer
+PTY/HTTP path using fake provider/native executables. The retained full-suite
+run supplied both variables and the matching boundary report; a prior six-test
+run is not evidence that all ten ran.
+These source tests do not run native Codex, prove its effective inventory/policy,
+or establish external host acknowledgement. Native loopback runs, when separately
+authorized and isolated, spend no model tokens but do not prove service availability.
 
 Set `CODEX_TEST_EVIDENCE_DIR` to a fresh absolute directory to retain fake launch
 and interactive fixture configs/native argv plus installer fixtures/backups.
