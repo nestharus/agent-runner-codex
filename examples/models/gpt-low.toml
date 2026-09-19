@@ -1,4 +1,4 @@
-# Codex Astra route for the standard model label.
+# Codex Sol route for the standard model label.
 provider = { binary = "agent-runner-codex" }
 
 [[inputs]]
@@ -9,26 +9,26 @@ required = true
 type = "string"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
+args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
+interactive_args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
 name = "codex"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
+args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
+interactive_args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
 name = "codex2"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
+args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
+interactive_args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
 name = "codex3"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
+args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
+interactive_args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
 name = "codex4"
 
 [[providers]]
-args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
-interactive_args = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"low\""]
+args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
+interactive_args = ["-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"low\""]
 name = "codex5"

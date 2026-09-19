@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage or apply Codex routes for Astra, Luna, Terra, or Sol labels."""
+"""Stage or apply Codex routes for standard, Astra, Luna, Terra, or Sol labels."""
 
 import argparse
 from datetime import datetime, timezone
@@ -171,19 +171,14 @@ def staged_model_text(existing, proposed):
     return proposed
 
 
-def selected_effort(effort, standard_labels):
-    if standard_labels and effort in ("high", "xhigh", "max"):
-        return "medium"
-    return effort
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-root", type=Path, default=Path.home()/".config/oulipoly-agent-runner")
     parser.add_argument("--stage-root", type=Path, required=True, help="Directory for reviewable labels and provider diff")
     parser.add_argument("--provider-path", type=Path, help="Installed provider binary; defaults to CONFIG_ROOT/agent-runner-codex/agent-runner-codex")
     selection = parser.add_mutually_exclusive_group()
-    selection.add_argument("--standard-labels", action="store_true", help="Promote gpt-low/medium/high/xhigh/max to Codex Astra, backing up and replacing existing labels")
+    selection.add_argument("--standard-labels", action="store_true", help="Route gpt-low/medium/high/xhigh/max to Codex Sol at matching efforts, backing up and replacing existing labels")
+    selection.add_argument("--astra-labels", action="store_true", help="Register gpt-astra-low/medium/high/xhigh/max with Codex Astra, backing up and replacing existing labels")
     selection.add_argument("--luna-labels", action="store_true", help="Register gpt-luna-low/medium/high/xhigh/max with Codex Luna, backing up and replacing existing labels")
     selection.add_argument("--terra-labels", action="store_true", help="Register gpt-terra-low/medium/high/xhigh/max with Codex Terra, backing up and replacing existing labels")
     selection.add_argument("--sol-labels", action="store_true", help="Register gpt-sol-low/medium/high/xhigh/max with Codex Sol, backing up and replacing existing labels")
@@ -201,10 +196,10 @@ def main():
         original.splitlines(keepends=True), proposed.splitlines(keepends=True),
         fromfile=str(providers_file), tofile=str(providers_file),
     )))
-    family = "luna" if args.luna_labels else "terra" if args.terra_labels else "sol" if args.sol_labels else "astra"
-    prefix = f"gpt-{family}" if family != "astra" else "gpt" if args.standard_labels else "codex-gpt"
+    family = "luna" if args.luna_labels else "terra" if args.terra_labels else "sol" if (args.sol_labels or args.standard_labels) else "astra"
+    prefix = "gpt" if args.standard_labels else f"gpt-{family}"
     model = f"gpt-5.6-{family}" if family != "astra" else "gpt-6-astra"
-    models = {f"{prefix}-{effort}.toml":model_text(selected_effort(effort, args.standard_labels), provider_path, model) for effort in EFFORTS}
+    models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path, model) for effort in EFFORTS}
     models = {name: staged_model_text(args.config_root/"models"/name, text)
               for name, text in models.items()}
     model_diffs = []
@@ -227,7 +222,7 @@ def main():
             raise SystemExit(f"Codex provider is not installed at {provider_path}")
         for name, text in models.items():
             destination = args.config_root/"models"/name
-            if not (args.standard_labels or args.luna_labels or args.terra_labels or args.sol_labels) and destination.exists() and destination.read_text() != text:
+            if not (args.standard_labels or args.astra_labels or args.luna_labels or args.terra_labels or args.sol_labels) and destination.exists() and destination.read_text() != text:
                 raise SystemExit(f"Refusing to replace different existing label {destination}")
         verify_provider_models(provider_path, args.config_root, models)
         verify_interactive_launcher(provider_path)

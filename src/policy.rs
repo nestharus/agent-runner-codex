@@ -167,7 +167,7 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
     let (model, effort) = models::route(name).ok_or_else(|| {
         invalid(
             "unknown_model",
-            "Select a gpt-* or codex-gpt-* Astra label, a gpt-luna-*, gpt-terra-*, or gpt-sol-* label with low/medium/high/xhigh/max effort, or the separately named Codex benchmark",
+            "Select a standard gpt-* Sol label or a gpt-astra-*, gpt-luna-*, gpt-terra-*, or gpt-sol-* label with low/medium/high/xhigh/max effort, or the separately named Codex benchmark",
         )
     })?;
     let provider_args: Vec<String> = serde_json::from_value(

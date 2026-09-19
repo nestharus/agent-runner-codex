@@ -111,8 +111,9 @@ with open(os.environ['CALLS'],'w') as f:
 }
 
 #[test]
-fn luna_terra_and_sol_interactive_routes_preserve_every_effort_and_account() {
+fn named_model_interactive_routes_preserve_every_effort_and_account() {
     for (family, model) in [
+        ("astra", "gpt-6-astra"),
         ("luna", "gpt-5.6-luna"),
         ("terra", "gpt-5.6-terra"),
         ("sol", "gpt-5.6-sol"),
@@ -244,7 +245,7 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
 #[test]
 fn default_and_exact_legacy_model_routes_are_managed() {
     for (args, model, effort) in [
-        (vec![], "gpt-6-astra", "medium"),
+        (vec![], "gpt-5.6-sol", "xhigh"),
         (
             vec!["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"max\""],
             "gpt-5.6-luna",
@@ -261,35 +262,40 @@ fn default_and_exact_legacy_model_routes_are_managed() {
 }
 
 #[test]
-fn astra_interactive_labels_and_explicit_native_efforts_remain_distinct() {
+fn standard_sol_and_named_astra_routes_remain_distinct() {
     for (label, effort) in [
         ("gpt-low", "low"),
         ("gpt-medium", "medium"),
-        ("gpt-high", "medium"),
-        ("gpt-xhigh", "medium"),
-        ("gpt-max", "medium"),
-        ("codex-gpt-low", "low"),
-        ("codex-gpt-medium", "medium"),
-        ("codex-gpt-high", "high"),
-        ("codex-gpt-xhigh", "xhigh"),
-        ("codex-gpt-max", "max"),
+        ("gpt-high", "high"),
+        ("gpt-xhigh", "xhigh"),
+        ("gpt-max", "max"),
     ] {
-        assert_astra_interactive(&["--model", label], effort);
+        assert_model_interactive(&["--model", label], "gpt-5.6-sol", effort);
+    }
+    for (label, effort) in [
+        ("gpt-astra-low", "low"),
+        ("gpt-astra-medium", "medium"),
+        ("gpt-astra-high", "high"),
+        ("gpt-astra-xhigh", "xhigh"),
+        ("gpt-astra-max", "max"),
+    ] {
+        assert_model_interactive(&["--model", label], "gpt-6-astra", effort);
     }
     for effort in ["low", "medium", "high", "xhigh", "max"] {
-        assert_astra_interactive(
+        assert_model_interactive(
             &[
                 "-m",
                 "gpt-6-astra",
                 "-c",
                 &format!("model_reasoning_effort=\"{effort}\""),
             ],
+            "gpt-6-astra",
             effort,
         );
     }
 }
 
-fn assert_astra_interactive(args: &[&str], effort: &str) {
+fn assert_model_interactive(args: &[&str], model: &str, effort: &str) {
     let f = Fixture::new();
     let result = f.command().args(args).output().unwrap();
     assert!(
@@ -301,7 +307,7 @@ fn assert_astra_interactive(args: &[&str], effort: &str) {
     let argv = call["argv"].as_array().unwrap();
     assert!(argv
         .windows(2)
-        .any(|pair| pair == [json!("-m"), json!("gpt-6-astra")]));
+        .any(|pair| pair == [json!("-m"), json!(model)]));
     let native_efforts: Vec<_> = argv
         .iter()
         .filter(|arg| {
@@ -375,6 +381,8 @@ fn tui_rejects_overrides_missing_dependencies_and_wrong_account_resume() {
         vec!["--model", "gpt-luna-ultra"],
         vec!["--model", "gpt-terra-ultra"],
         vec!["--model", "gpt-sol-ultra"],
+        vec!["--model", "gpt-astra-ultra"],
+        vec!["--model", "codex-gpt-high"],
         vec![
             "-m",
             "gpt-5.6-terra",

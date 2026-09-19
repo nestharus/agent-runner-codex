@@ -52,7 +52,7 @@ for event in [{'type':'thread.started','thread_id':'11111111-2222-3333-4444-5555
         file(&config.join("config.toml"),&format!("codex_bin = {:?}\nbun_bin = {:?}\nbash_mcp_path = {:?}\nsystem_prompt_file = {:?}\nagent_bash_bin = {:?}\nagent_runner_bin = {:?}\n",codex,bash,mcp,prompt,bash,bash));
         let request = json!({"contract":"oulipoly.provider/v1","request_id":"launch-fixture","provider_instance_id":"codex2",
             "host":{"app":"test","config_root":r.join("config"),"data_root":r.join("data"),"env":{"HOME":r,"CUSTOM_SENTINEL":"inherited","CALLS":r.join("calls.jsonl")}},
-            "params":{"settings_id":"codex2","mode":"arg","model":{"name":"codex-gpt-high","provider_args":["-m","gpt-6-astra","-c","model_reasoning_effort=\"high\""],"inputs":{"prompt":"test prompt","named":{}}},
+            "params":{"settings_id":"codex2","mode":"arg","model":{"name":"gpt-astra-high","provider_args":["-m","gpt-6-astra","-c","model_reasoning_effort=\"high\""],"inputs":{"prompt":"test prompt","named":{}}},
                 "argv":["codex2","exec","--dangerously-bypass-approvals-and-sandbox","-m","gpt-6-astra","-c","model_reasoning_effort=\"high\""],"working_directory":r,"env":{}}});
         Self { root, request }
     }
@@ -73,10 +73,10 @@ for event in [{'type':'thread.started','thread_id':'11111111-2222-3333-4444-5555
         )
     }
 }
-fn astra_request(f: &Fixture, label: &str, effort: &str) -> Value {
+fn model_request(f: &Fixture, label: &str, model: &str, effort: &str) -> Value {
     let args = json!([
         "-m",
-        "gpt-6-astra",
+        model,
         "-c",
         format!("model_reasoning_effort=\"{effort}\"")
     ]);
@@ -96,26 +96,26 @@ fn astra_request(f: &Fixture, label: &str, effort: &str) -> Value {
 }
 
 #[test]
-fn astra_standard_and_compatibility_native_argv_are_independently_checked() {
-    for (label, effort) in [
-        ("gpt-low", "low"),
-        ("gpt-medium", "medium"),
-        ("gpt-high", "medium"),
-        ("gpt-xhigh", "medium"),
-        ("gpt-max", "medium"),
-        ("codex-gpt-low", "low"),
-        ("codex-gpt-medium", "medium"),
-        ("codex-gpt-high", "high"),
-        ("codex-gpt-xhigh", "xhigh"),
-        ("codex-gpt-max", "max"),
+fn standard_sol_and_named_astra_argv_are_independently_checked() {
+    for (label, model, effort) in [
+        ("gpt-low", "gpt-5.6-sol", "low"),
+        ("gpt-medium", "gpt-5.6-sol", "medium"),
+        ("gpt-high", "gpt-5.6-sol", "high"),
+        ("gpt-xhigh", "gpt-5.6-sol", "xhigh"),
+        ("gpt-max", "gpt-5.6-sol", "max"),
+        ("gpt-astra-low", "gpt-6-astra", "low"),
+        ("gpt-astra-medium", "gpt-6-astra", "medium"),
+        ("gpt-astra-high", "gpt-6-astra", "high"),
+        ("gpt-astra-xhigh", "gpt-6-astra", "xhigh"),
+        ("gpt-astra-max", "gpt-6-astra", "max"),
     ] {
-        assert_astra_launch(label, effort);
+        assert_model_launch(label, model, effort);
     }
 }
 
-fn assert_astra_launch(label: &str, effort: &str) {
+fn assert_model_launch(label: &str, model: &str, effort: &str) {
     let f = Fixture::new();
-    let request = astra_request(&f, label, effort);
+    let request = model_request(&f, label, model, effort);
     let (code, response) = f.invoke("policy.evaluate", &request);
     assert_eq!(code, 0);
     assert_eq!(
@@ -137,7 +137,7 @@ fn assert_astra_launch(label: &str, effort: &str) {
     let argv = calls[0]["argv"].as_array().unwrap();
     assert!(argv
         .windows(2)
-        .any(|pair| pair == [json!("-m"), json!("gpt-6-astra")]));
+        .any(|pair| pair == [json!("-m"), json!(model)]));
     let native_efforts: Vec<_> = argv
         .iter()
         .filter(|arg| {
@@ -153,8 +153,8 @@ fn assert_astra_launch(label: &str, effort: &str) {
 }
 
 #[test]
-fn astra_stale_standard_efforts_are_rejected_before_spawn() {
-    for effort in ["high", "xhigh", "max"] {
+fn stale_astra_standard_routes_are_rejected_before_spawn() {
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
         assert_stale_astra_rejected(effort);
     }
 }
@@ -162,7 +162,7 @@ fn astra_stale_standard_efforts_are_rejected_before_spawn() {
 fn assert_stale_astra_rejected(effort: &str) {
     let f = Fixture::new();
     let label = format!("gpt-{effort}");
-    let mut request = astra_request(&f, &label, effort);
+    let mut request = model_request(&f, &label, "gpt-6-astra", effort);
     let (_, response) = f.invoke("policy.evaluate", &request);
     assert_eq!(
         response[0]["result"]["accepted"], false,
@@ -175,12 +175,12 @@ fn assert_stale_astra_rejected(effort: &str) {
     let (code, response) = f.invoke("launch", &request);
     assert_ne!(code, 0);
     assert_eq!(response[0]["error"]["code"], "model_args_mismatch");
-    // Matching provider_args must not launder a stale (or appended) argv override.
+    // Matching Sol provider_args must not launder stale Astra argv.
     request["params"]["model"]["provider_args"] = json!([
         "-m",
-        "gpt-6-astra",
+        "gpt-5.6-sol",
         "-c",
-        "model_reasoning_effort=\"medium\""
+        format!("model_reasoning_effort=\"{effort}\"")
     ]);
     let (_, response) = f.invoke("policy.evaluate", &request);
     assert_eq!(response[0]["result"]["accepted"], false);
@@ -195,8 +195,9 @@ fn assert_stale_astra_rejected(effort: &str) {
 }
 
 #[test]
-fn luna_terra_and_sol_labels_pass_policy_and_launch_with_managed_tools_in_every_account() {
+fn named_model_families_pass_policy_and_launch_with_managed_tools_in_every_account() {
     for (family, model) in [
+        ("astra", "gpt-6-astra"),
         ("luna", "gpt-5.6-luna"),
         ("terra", "gpt-5.6-terra"),
         ("sol", "gpt-5.6-sol"),
@@ -328,15 +329,21 @@ fn policy_rejects_route_overrides_before_spawn() {
 }
 
 #[test]
-fn luna_terra_and_sol_reject_ultra_and_cross_model_or_effort_arguments() {
+fn named_model_families_reject_ultra_and_cross_model_or_effort_arguments() {
     for (family, model) in [
+        ("astra", "gpt-6-astra"),
         ("luna", "gpt-5.6-luna"),
         ("terra", "gpt-5.6-terra"),
         ("sol", "gpt-5.6-sol"),
     ] {
+        let cross_model = if model == "gpt-6-astra" {
+            "gpt-5.6-sol"
+        } else {
+            "gpt-6-astra"
+        };
         for (label_effort, argument_model, argument_effort, expected) in [
             ("ultra", model, "ultra", "unknown_model"),
-            ("high", "gpt-6-astra", "high", "model_args_mismatch"),
+            ("high", cross_model, "high", "model_args_mismatch"),
             ("high", model, "max", "model_args_mismatch"),
         ] {
             let f = Fixture::new();

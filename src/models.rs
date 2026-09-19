@@ -6,8 +6,8 @@ pub const SOL: &str = "gpt-5.6-sol";
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 pub const BENCH: &str = "codex-exec-bench";
 const FAMILIES: &[(&str, &str)] = &[
-    ("gpt-", ASTRA),
-    ("codex-gpt-", ASTRA),
+    ("gpt-", SOL),
+    ("gpt-astra-", ASTRA),
     ("gpt-luna-", LUNA),
     ("gpt-terra-", TERRA),
     ("gpt-sol-", SOL),
@@ -16,8 +16,6 @@ const FAMILIES: &[(&str, &str)] = &[
 pub fn route(name: &str) -> Option<(&'static str, &'static str)> {
     match name {
         BENCH => Some((LUNA, "low")),
-        // Standard execution tiers are aliases, not native effort names.
-        "gpt-high" | "gpt-xhigh" | "gpt-max" => Some((ASTRA, "medium")),
         _ => FAMILIES
             .iter()
             .find_map(|(prefix, model)| native_route(name, prefix, model)),

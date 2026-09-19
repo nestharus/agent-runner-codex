@@ -35,8 +35,9 @@ The runtime configuration always lives at
 python3 scripts/install-labels.py --stage-root /tmp/codex-labels
 ```
 
-The generated `models/` directory contains `codex-gpt-low`,
-`codex-gpt-medium`, `codex-gpt-high`, `codex-gpt-xhigh`, and `codex-gpt-max`. Each selects `gpt-6-astra`, the corresponding native Codex
+The generated `models/` directory contains `gpt-astra-low`,
+`gpt-astra-medium`, `gpt-astra-high`, `gpt-astra-xhigh`, and `gpt-astra-max`.
+Each selects `gpt-6-astra`, the corresponding native Codex
 reasoning effort, and the five existing accounts `codex` through `codex5`.
 Both headless and interactive model arguments are included. `providers.patch`
 shows the five account implementation executable changes, canonical
@@ -59,12 +60,13 @@ managed interactive launcher. It preserves account instructions and tool
 restrictions. Existing different settings IDs are rejected for review. Before
 activation, the binary must support both the requested model catalog and the
 managed `interactive` launcher; an older headless-only provider cannot pass.
-In the default temporary-label mode, existing OpenCode labels and the default
-provider stay unchanged. A differing existing `codex-gpt-*` label causes an
-error before installation.
+In the default named-Astra mode, existing standard labels and the default
+provider stay unchanged. A differing existing `gpt-astra-*` label causes an
+error before installation; use `--astra-labels` to stage its reviewed replacement
+with the same backup behavior as the other explicit family modes.
 
 To promote the standard `gpt-low`, `gpt-medium`, `gpt-high`, `gpt-xhigh`, and
-`gpt-max` names to Codex Astra, stage and apply with the explicit standard-label
+`gpt-max` names to Codex Sol, stage and apply with the explicit standard-label
 mode:
 
 ```bash
@@ -74,24 +76,32 @@ python3 scripts/install-labels.py --standard-labels \
   --stage-root /tmp/codex-standard-labels --apply
 ```
 
-Review `models.patch` before applying. Standard `gpt-low` stays Astra/low;
-`gpt-medium`, `gpt-high`, `gpt-xhigh`, and `gpt-max` select Astra/medium.
-The managed no-model PTY default remains `gpt-xhigh`, now medium. For actual
-native high/xhigh/max effort, use the preserved `codex-gpt-high`,
-`codex-gpt-xhigh`, or `codex-gpt-max` routes (or an exact native PTY argument pair).
-No new Astra aliases are added.
+Review `models.patch` before applying. Every standard label selects `gpt-5.6-sol`
+at the matching native effort, including high, xhigh, and max. The managed
+no-model PTY default remains `gpt-xhigh`, now Sol/xhigh. The preserved
+`gpt-astra-*` routes select Astra at matching efforts; exact native PTY argument
+pairs remain supported.
 
-This mode stages all five model files, but equivalent existing routes retain
-their bytes (including low/medium comments and formatting). Only changed files
-are replaced and their previous contents saved under `backups/codex-astra-*/models/`
-alongside the provider configuration backup. It preserves the temporary
-`codex-gpt-*` aliases, other model labels, and the configured default provider.
+This mode stages all five model files, but equivalent existing Sol routes retain
+their bytes, including comments and formatting. Only changed files are replaced
+and their previous contents saved under `backups/codex-sol-*/models/`
+alongside the provider configuration backup. It preserves the named
+`gpt-astra-*` aliases, other model labels, and the configured default provider.
 Before any mode applies routing changes, the installed provider must
 advertise every target label with the exact selected model, reasoning arguments,
 and all five eligible accounts. Install the updated provider first when
 promoting the standard labels. Stale high/xhigh/max route arguments are rejected
-by strict headless admission; update the source-backed routes with this mode
+by strict headless admission; stale Astra routes at any effort are also rejected.
+Update the source-backed routes with this mode
 rather than adding arbitrary argument overrides.
+
+To explicitly replace and back up existing `gpt-astra-low`, `gpt-astra-medium`,
+`gpt-astra-high`, `gpt-astra-xhigh`, and `gpt-astra-max` routes:
+
+```bash
+python3 scripts/install-labels.py --astra-labels --stage-root /tmp/codex-astra-labels
+python3 scripts/install-labels.py --astra-labels --stage-root /tmp/codex-astra-labels --apply
+```
 
 To register `gpt-luna-low`, `gpt-luna-medium`, `gpt-luna-high`, `gpt-luna-xhigh`,
 and `gpt-luna-max` with Codex:
@@ -126,7 +136,8 @@ python3 scripts/install-labels.py --sol-labels --stage-root /tmp/codex-sol-label
 
 Sol uses the same account pool and saves replaced routes under
 `backups/codex-sol-*/models/`. No family includes `ultra`.
-`--luna-labels`, `--terra-labels`, `--sol-labels`, and `--standard-labels` are mutually exclusive;
+`--astra-labels`, `--luna-labels`, `--terra-labels`, `--sol-labels`, and
+`--standard-labels` are mutually exclusive;
 apply the desired families separately after installing the updated provider and
 managed catalog. Each mode requires every selected route to be advertised before
 it changes any installed configuration, and preserves unrelated labels and the
@@ -183,11 +194,12 @@ provider. No credentials are copied or created by this script.
 
 `tests/verify_codex_inventory.py --binary /exact/provider --label gpt-high`
 checks the managed headless native request against a loopback Responses server.
-Repeat with `gpt-xhigh`, `gpt-max` (medium), and `codex-gpt-xhigh` (native xhigh).
+Repeat with `gpt-xhigh`, `gpt-max`, and `gpt-astra-xhigh` to cover both Sol and
+Astra routes at their matching native efforts.
 Use `--output-dir /new/evidence/path` to retain isolated configs, request/response
 bodies and raw provider results. `tests/verify_codex_tui_inventory.py --binary
 /exact/provider --no-model --output-dir /tmp/short-new-path` checks the actual
-no-model PTY at medium, including managed tools and native session binding;
+no-model PTY at Sol/xhigh, including managed tools and native session binding;
 use a short path for its Unix socket. These checks spend no model tokens and
 use new test homes, not native credentials. They do not prove service availability.
 

@@ -20,8 +20,8 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
     let metadata: Value =
         serde_json::from_str(include_str!("../integrations/codex/models.json")).unwrap();
     for (prefix, model) in [
-        ("gpt-", "gpt-6-astra"),
-        ("codex-gpt-", "gpt-6-astra"),
+        ("gpt-", "gpt-5.6-sol"),
+        ("gpt-astra-", "gpt-6-astra"),
         ("gpt-luna-", "gpt-5.6-luna"),
         ("gpt-terra-", "gpt-5.6-terra"),
         ("gpt-sol-", "gpt-5.6-sol"),
@@ -40,11 +40,6 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
             .collect();
         assert_eq!(levels, ["low", "medium", "high", "xhigh", "max"]);
         for effort in levels {
-            let native_effort = if prefix == "gpt-" && matches!(effort, "high" | "xhigh" | "max") {
-                "medium"
-            } else {
-                effort
-            };
             let name = format!("{prefix}{effort}");
             let matches: Vec<_> = entries
                 .iter()
@@ -58,7 +53,7 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
                     "-m",
                     model,
                     "-c",
-                    format!("model_reasoning_effort=\"{native_effort}\"")
+                    format!("model_reasoning_effort=\"{effort}\"")
                 ])
             );
             assert_eq!(
@@ -70,6 +65,9 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
     assert!(!entries
         .iter()
         .any(|entry| entry["name"] == "codex-exec-bench"));
+    assert!(!entries.iter().any(|entry| entry["name"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("codex-gpt-"))));
 }
 
 #[test]
