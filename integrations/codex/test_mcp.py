@@ -106,7 +106,7 @@ class AdapterTest(unittest.TestCase):
 
     def test_headless_children_remain_async_and_pin_runner(self):
         self.start()
-        self.send("tools/call", {"name": "bash", "arguments": {"command": "agents -m codex-gpt-low task", "delivery": "sync"}})
+        self.send("tools/call", {"name": "bash", "arguments": {"command": "agents -m gpt-astra-low task", "delivery": "sync"}})
         self.assertIn("End this headless turn", self.receive()["result"]["content"][0]["text"])
         run = self.calls()[0]["args"]
         self.assertIn("async", run)

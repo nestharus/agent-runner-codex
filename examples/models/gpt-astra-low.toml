@@ -1,4 +1,4 @@
-# Temporary Codex route for the OpenCode migration.
+# Codex Astra route for the named model label.
 provider = { binary = "agent-runner-codex" }
 
 [[inputs]]

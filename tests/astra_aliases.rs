@@ -3,16 +3,11 @@ use agent_runner_codex::models;
 
 #[test]
 fn standard_alias_mapping_and_preserved_native_families() {
-    for (label, effort) in [
-        ("gpt-low", "low"),
-        ("gpt-medium", "medium"),
-        ("gpt-high", "medium"),
-        ("gpt-xhigh", "medium"),
-        ("gpt-max", "medium"),
-    ] {
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        let label = format!("gpt-{effort}");
         assert_eq!(
-            models::route(label),
-            Some(("gpt-6-astra", effort)),
+            models::route(&label),
+            Some(("gpt-5.6-sol", effort)),
             "{label}"
         );
     }
@@ -21,7 +16,7 @@ fn standard_alias_mapping_and_preserved_native_families() {
 #[test]
 fn compatibility_named_and_benchmark_routes_keep_native_efforts() {
     for (prefix, model) in [
-        ("codex-gpt-", "gpt-6-astra"),
+        ("gpt-astra-", "gpt-6-astra"),
         ("gpt-luna-", "gpt-5.6-luna"),
         ("gpt-terra-", "gpt-5.6-terra"),
         ("gpt-sol-", "gpt-5.6-sol"),
@@ -44,16 +39,22 @@ fn assert_native_family(prefix: &str, model: &str) {
 }
 
 #[test]
-fn unknown_astra_aliases_and_ultra_remain_unregistered() {
+fn ultra_aliases_remain_unregistered() {
     for name in [
-        "gpt-astra-medium",
-        "gpt-astra-xhigh",
         "gpt-ultra",
-        "codex-gpt-ultra",
+        "gpt-astra-ultra",
         "gpt-luna-ultra",
         "gpt-terra-ultra",
         "gpt-sol-ultra",
     ] {
         assert_eq!(models::route(name), None, "{name}");
+    }
+}
+
+#[test]
+fn removed_codex_gpt_aliases_remain_unregistered() {
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        let name = format!("codex-gpt-{effort}");
+        assert_eq!(models::route(&name), None, "{name}");
     }
 }

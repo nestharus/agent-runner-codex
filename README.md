@@ -12,13 +12,11 @@ Codex-specific launch and rollout handling replace OpenCode's native boundaries.
 
 ## Models and accounts
 
-Standard labels select `gpt-6-astra`: `gpt-low` uses low effort, while
-`gpt-medium`, `gpt-high`, `gpt-xhigh`, and `gpt-max` all use medium effort.
-The existing `codex-gpt-{low,medium,high,xhigh,max}` compatibility labels retain
-their corresponding **native** efforts; the last three are not equivalent to
-the standard aliases. Use `codex-gpt-high`, `codex-gpt-xhigh`, or `codex-gpt-max`
-when explicitly requesting those native Astra efforts. No `gpt-astra-*` labels
-are registered. Native sub-agent delegation remains disabled for every label.
+Standard labels `gpt-{low,medium,high,xhigh,max}` select `gpt-5.6-sol` with the
+matching native reasoning effort. These routes do not cap high, xhigh, or max.
+The `gpt-astra-{low,medium,high,xhigh,max}` labels select `gpt-6-astra` with
+their matching native efforts and are distinct from the standard Sol aliases.
+Native sub-agent delegation remains disabled for every label.
 
 `gpt-luna-{low,medium,high,xhigh,max}`, `gpt-terra-{low,medium,high,xhigh,max}`,
 and `gpt-sol-{low,medium,high,xhigh,max}` use the same Codex adapter and five-account
@@ -55,11 +53,12 @@ Agent Runner's PTY. An unverified CLI version is rejected
 before model execution. It does not depend on app-server dynamic tools.
 
 A pinned model catalog removes metadata-forced native tools in addition to the
-feature flags. Native inventory tests support every Astra, Luna, and Terra
+feature flags. Native inventory tests support every Astra, Luna, Terra, and Sol
 effort and the Luna benchmark against a local Responses endpoint without spending
-model tokens. Standard high/xhigh/max aliases are checked at medium; the
-compatibility labels still exercise native high/xhigh/max. Deterministic launch fixtures cover both invocation modes and all
-five accounts; these checks do not establish live service availability.
+model tokens. Standard aliases are checked at their matching Sol efforts, while
+the named Astra labels exercise matching Astra efforts. Deterministic launch
+fixtures cover both invocation modes and all five accounts; these checks do not
+establish live service availability.
 The remaining built-in tools only request user input or inspect MCP resources;
 Agent Bash is the sole execution tool.
 
@@ -91,10 +90,10 @@ Account `system_prompt_override` is read from `providers.toml` and passed as dev
 retains terminal rendering, input, process ownership, and notification delivery.
 The Bash bridge preserves interactive delivery and cancellation behavior even
 though MCP itself uses pipes. Sessionless managed PTY launches default to
-`gpt-xhigh`, hence Astra/medium.
+`gpt-xhigh`, hence Sol/xhigh.
 Explicit model labels select their catalog model and effort. Exact native
 `-m gpt-6-astra -c 'model_reasoning_effort="xhigh"'` (or high/max) PTY
-arguments retain that native effort via the compatibility catalog.
+arguments retain that native effort via the named Astra catalog.
 
 Codex's interactive CLI does not support the exec-only user-configuration
 isolation flags. Managed PTY launches therefore use a private configuration
@@ -237,33 +236,33 @@ absolute paths for `codex_bin`, `bun_bin`, `bash_mcp_path`, `system_prompt_file`
 not read an envelope or wait for stdin; the installer also probes with stdin
 explicitly disconnected.
 
-Stage and activate the temporary labels after installing and validating the
+Stage and activate the named Astra labels after installing and validating the
 provider:
 
 ```sh
-python3 scripts/install-labels.py --stage-root /tmp/agent-runner-codex-labels
-python3 scripts/install-labels.py --stage-root /tmp/agent-runner-codex-labels --apply
-agents -m codex-gpt-high -p /path/to/project 'Your task'
+python3 scripts/install-labels.py --stage-root /tmp/agent-runner-astra-labels
+python3 scripts/install-labels.py --stage-root /tmp/agent-runner-astra-labels --apply
+agents -m gpt-astra-high -p /path/to/project 'Your task'
 ```
 
 The default label installer preserves existing standard labels and backs up the
 provider configuration before changing Codex implementation paths and assigning
 canonical account settings IDs. To move the five standard `gpt-*` labels to
-Codex Astra after validating the provider, stage and apply the promotion:
+Codex Sol after validating the provider, stage and apply the promotion:
 
 ```sh
-python3 scripts/install-labels.py --standard-labels --stage-root /tmp/agent-runner-astra-labels
-python3 scripts/install-labels.py --standard-labels --stage-root /tmp/agent-runner-astra-labels --apply
+python3 scripts/install-labels.py --standard-labels --stage-root /tmp/agent-runner-standard-sol-labels
+python3 scripts/install-labels.py --standard-labels --stage-root /tmp/agent-runner-standard-sol-labels --apply
 agents -m gpt-high -p /path/to/project 'Your task'
 ```
 
 Standard-label staging includes all five routes. Applying backs up and replaces
-only changed route files; already-equivalent low/medium routes keep their exact
-bytes, including comments and formatting. On an existing standard Astra setup,
-only high/xhigh/max effort arguments change to medium. Both label families use
-the same Codex accounts, system prompt, and Bash tool configuration. The installed
-provider must advertise the new arguments before activation; stale standard
-high/xhigh/max argument pairs are rejected, not silently accepted or rewritten.
+only changed route files; already-equivalent Sol routes keep their exact bytes,
+including comments and formatting. On an existing standard Astra setup, all five
+routes change to Sol with matching efforts. Both label families use the same Codex
+accounts, system prompt, and Bash tool configuration. The installed provider must
+advertise the new arguments before activation; stale standard Astra argument pairs
+are rejected, not silently accepted or rewritten.
 
 To register all five Luna efforts with Codex, including the existing low/max
 labels:

@@ -23,14 +23,14 @@ import time
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('target/debug/agent-runner-codex'))
-    parser.add_argument('--label', default='gpt-luna-low', choices=[prefix+e for prefix in ['gpt-', 'codex-gpt-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']])
-    parser.add_argument('--no-model', action='store_true', help='Omit --model to check the managed gpt-xhigh default (Astra/medium)')
+    parser.add_argument('--label', default='gpt-luna-low', choices=[prefix+e for prefix in ['gpt-', 'gpt-astra-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']])
+    parser.add_argument('--no-model', action='store_true', help='Omit --model to check the managed gpt-xhigh default (Sol/xhigh)')
     parser.add_argument('--output-dir', type=Path)
     args = parser.parse_args()
     args.binary = args.binary.resolve()
     if args.no_model:
         args.label = 'gpt-xhigh'
-    effort = 'medium' if args.label in ['gpt-high', 'gpt-xhigh', 'gpt-max'] else args.label.rsplit('-', 1)[1]
+    effort = args.label.rsplit('-', 1)[1]
     repo = Path(__file__).resolve().parents[1]
     root = (args.output_dir or Path(tempfile.mkdtemp(prefix='codex-tui-inventory-'))).absolute()
     root.mkdir(parents=True, exist_ok=True)
@@ -122,7 +122,8 @@ def main():
         body=captured[0]
         model=('gpt-5.6-luna' if args.label.startswith('gpt-luna-')
                else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
-               else 'gpt-5.6-sol' if args.label.startswith('gpt-sol-') else 'gpt-6-astra')
+               else 'gpt-6-astra' if args.label.startswith('gpt-astra-')
+               else 'gpt-5.6-sol' if args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
         assert body['model']==model
         assert body['reasoning']['effort']==effort, body['reasoning']
         tools=list(body.get('tools',[]))
