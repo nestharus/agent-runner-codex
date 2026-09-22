@@ -114,9 +114,9 @@ with open(os.environ['CALLS'],'w') as f:
 fn named_model_interactive_routes_preserve_every_effort_and_account() {
     for (family, model) in [
         ("astra", "gpt-6-astra"),
-        ("luna", "gpt-5.6-luna"),
+        ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-5.6-sol"),
+        ("sol", "gpt-6-sol"),
     ] {
         for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
@@ -225,7 +225,7 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
         "features.multi_agent=false",
         "mcp_servers.agent_bash.enabled_tools=[\"bash\"]",
         "developer_instructions=\"account extra instructions\"",
-        "gpt-5.6-luna",
+        "gpt-6-luna",
         "model_reasoning_effort=\"low\"",
     ] {
         assert!(argv.contains(&json!(value)), "{value}");
@@ -245,10 +245,10 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
 #[test]
 fn default_and_exact_legacy_model_routes_are_managed() {
     for (args, model, effort) in [
-        (vec![], "gpt-5.6-sol", "xhigh"),
+        (vec![], "gpt-6-sol", "xhigh"),
         (
-            vec!["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"max\""],
-            "gpt-5.6-luna",
+            vec!["-m", "gpt-6-luna", "-c", "model_reasoning_effort=\"max\""],
+            "gpt-6-luna",
             "max",
         ),
     ] {
@@ -270,7 +270,7 @@ fn standard_sol_and_named_astra_routes_remain_distinct() {
         ("gpt-xhigh", "xhigh"),
         ("gpt-max", "max"),
     ] {
-        assert_model_interactive(&["--model", label], "gpt-5.6-sol", effort);
+        assert_model_interactive(&["--model", label], "gpt-6-sol", effort);
     }
     for (label, effort) in [
         ("gpt-astra-low", "low"),
@@ -451,7 +451,7 @@ fn headless_policy_accepts_only_its_exact_managed_executable_carrier() {
     let f = Fixture::new();
     let binary = Path::new(env!("CARGO_BIN_EXE_agent-runner-codex"));
     for (carrier, accepted) in [(binary, true), (f.root.path(), false)] {
-        let args = ["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"low\""];
+        let args = ["-m", "gpt-6-luna", "-c", "model_reasoning_effort=\"low\""];
         let mut argv = vec![
             json!(carrier),
             json!("exec"),

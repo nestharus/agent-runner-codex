@@ -76,7 +76,7 @@ python3 scripts/install-labels.py --standard-labels \
   --stage-root /tmp/codex-standard-labels --apply
 ```
 
-Review `models.patch` before applying. Every standard label selects `gpt-5.6-sol`
+Review `models.patch` before applying. Every standard label selects `gpt-6-sol`
 at the matching native effort, including high, xhigh, and max. The managed
 no-model PTY default remains `gpt-xhigh`, now Sol/xhigh. The preserved
 `gpt-astra-*` routes select Astra at matching efforts; exact native PTY argument
@@ -111,7 +111,7 @@ python3 scripts/install-labels.py --luna-labels --stage-root /tmp/codex-luna-lab
 python3 scripts/install-labels.py --luna-labels --stage-root /tmp/codex-luna-labels --apply
 ```
 
-This mode uses `gpt-5.6-luna` with the matching effort and all five Codex accounts.
+This mode uses `gpt-6-luna` with the matching effort and all five Codex accounts.
 It creates missing routes and saves replaced routes under
 `backups/codex-luna-*/models/`.
 
@@ -127,7 +127,7 @@ Terra uses the same account pool and saves replaced routes under
 `backups/codex-terra-*/models/`.
 
 To register `gpt-sol-low`, `gpt-sol-medium`, `gpt-sol-high`, `gpt-sol-xhigh`,
-and `gpt-sol-max` with `gpt-5.6-sol`:
+and `gpt-sol-max` with `gpt-6-sol`:
 
 ```bash
 python3 scripts/install-labels.py --sol-labels --stage-root /tmp/codex-sol-labels
@@ -144,7 +144,7 @@ it changes any installed configuration, and preserves unrelated labels and the
 configured default provider.
 
 `benchmark-models/codex-exec-bench.toml` is generated separately and never
-installed into production routing. It uses `gpt-5.6-luna` at low reasoning for
+installed into production routing. It uses `gpt-6-luna` at low reasoning for
 the repository's live-test requirement. Prepare an isolated runner, default
 model directory, and state directory with:
 

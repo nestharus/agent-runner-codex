@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 pub const ASTRA: &str = "gpt-6-astra";
-pub const LUNA: &str = "gpt-5.6-luna";
+pub const LUNA: &str = "gpt-6-luna";
 pub const TERRA: &str = "gpt-5.6-terra";
-pub const SOL: &str = "gpt-5.6-sol";
+pub const SOL: &str = "gpt-6-sol";
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 pub const BENCH: &str = "codex-exec-bench";
 const FAMILIES: &[(&str, &str)] = &[

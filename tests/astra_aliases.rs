@@ -7,7 +7,7 @@ fn standard_alias_mapping_and_preserved_native_families() {
         let label = format!("gpt-{effort}");
         assert_eq!(
             models::route(&label),
-            Some(("gpt-5.6-sol", effort)),
+            Some(("gpt-6-sol", effort)),
             "{label}"
         );
     }
@@ -17,15 +17,15 @@ fn standard_alias_mapping_and_preserved_native_families() {
 fn compatibility_named_and_benchmark_routes_keep_native_efforts() {
     for (prefix, model) in [
         ("gpt-astra-", "gpt-6-astra"),
-        ("gpt-luna-", "gpt-5.6-luna"),
+        ("gpt-luna-", "gpt-6-luna"),
         ("gpt-terra-", "gpt-5.6-terra"),
-        ("gpt-sol-", "gpt-5.6-sol"),
+        ("gpt-sol-", "gpt-6-sol"),
     ] {
         assert_native_family(prefix, model);
     }
     assert_eq!(
         models::route("codex-exec-bench"),
-        Some(("gpt-5.6-luna", "low"))
+        Some(("gpt-6-luna", "low"))
     );
 }
 

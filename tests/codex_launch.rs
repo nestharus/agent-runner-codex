@@ -98,11 +98,11 @@ fn model_request(f: &Fixture, label: &str, model: &str, effort: &str) -> Value {
 #[test]
 fn standard_sol_and_named_astra_argv_are_independently_checked() {
     for (label, model, effort) in [
-        ("gpt-low", "gpt-5.6-sol", "low"),
-        ("gpt-medium", "gpt-5.6-sol", "medium"),
-        ("gpt-high", "gpt-5.6-sol", "high"),
-        ("gpt-xhigh", "gpt-5.6-sol", "xhigh"),
-        ("gpt-max", "gpt-5.6-sol", "max"),
+        ("gpt-low", "gpt-6-sol", "low"),
+        ("gpt-medium", "gpt-6-sol", "medium"),
+        ("gpt-high", "gpt-6-sol", "high"),
+        ("gpt-xhigh", "gpt-6-sol", "xhigh"),
+        ("gpt-max", "gpt-6-sol", "max"),
         ("gpt-astra-low", "gpt-6-astra", "low"),
         ("gpt-astra-medium", "gpt-6-astra", "medium"),
         ("gpt-astra-high", "gpt-6-astra", "high"),
@@ -178,7 +178,7 @@ fn assert_stale_astra_rejected(effort: &str) {
     // Matching Sol provider_args must not launder stale Astra argv.
     request["params"]["model"]["provider_args"] = json!([
         "-m",
-        "gpt-5.6-sol",
+        "gpt-6-sol",
         "-c",
         format!("model_reasoning_effort=\"{effort}\"")
     ]);
@@ -198,9 +198,9 @@ fn assert_stale_astra_rejected(effort: &str) {
 fn named_model_families_pass_policy_and_launch_with_managed_tools_in_every_account() {
     for (family, model) in [
         ("astra", "gpt-6-astra"),
-        ("luna", "gpt-5.6-luna"),
+        ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-5.6-sol"),
+        ("sol", "gpt-6-sol"),
     ] {
         for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
@@ -332,12 +332,12 @@ fn policy_rejects_route_overrides_before_spawn() {
 fn named_model_families_reject_ultra_and_cross_model_or_effort_arguments() {
     for (family, model) in [
         ("astra", "gpt-6-astra"),
-        ("luna", "gpt-5.6-luna"),
+        ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-5.6-sol"),
+        ("sol", "gpt-6-sol"),
     ] {
         let cross_model = if model == "gpt-6-astra" {
-            "gpt-5.6-sol"
+            "gpt-6-sol"
         } else {
             "gpt-6-astra"
         };
@@ -771,12 +771,7 @@ fn sigterm_cancels_cli_and_reaps_native_process_group() {
 
 #[test]
 fn model_catalog_cannot_reenable_native_tools() {
-    for slug in [
-        "gpt-6-astra",
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-    ] {
+    for slug in ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol"] {
         let f = Fixture::new();
         let path = f.root.path().join("models.json");
         let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -799,12 +794,7 @@ fn model_catalog_cannot_reenable_native_tools() {
 
 #[test]
 fn missing_or_duplicate_model_metadata_rejects_launch_before_spawn() {
-    for slug in [
-        "gpt-6-astra",
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-    ] {
+    for slug in ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol"] {
         for duplicate in [false, true] {
             let f = Fixture::new();
             let path = f.root.path().join("models.json");

@@ -20,11 +20,11 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
     let metadata: Value =
         serde_json::from_str(include_str!("../integrations/codex/models.json")).unwrap();
     for (prefix, model) in [
-        ("gpt-", "gpt-5.6-sol"),
+        ("gpt-", "gpt-6-sol"),
         ("gpt-astra-", "gpt-6-astra"),
-        ("gpt-luna-", "gpt-5.6-luna"),
+        ("gpt-luna-", "gpt-6-luna"),
         ("gpt-terra-", "gpt-5.6-terra"),
-        ("gpt-sol-", "gpt-5.6-sol"),
+        ("gpt-sol-", "gpt-6-sol"),
     ] {
         let native = metadata["models"]
             .as_array()

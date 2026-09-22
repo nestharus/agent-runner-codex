@@ -72,7 +72,7 @@ class LabelInstallerTests(unittest.TestCase):
     def assert_standard_routes(self, directory):
         for label in EFFORTS:
             route = tomllib.loads((directory / f'gpt-{label}.toml').read_text())
-            expected = ['-m', 'gpt-5.6-sol', '-c', f'model_reasoning_effort="{label}"']
+            expected = ['-m', 'gpt-6-sol', '-c', f'model_reasoning_effort="{label}"']
             self.assertEqual([p['name'] for p in route['providers']], ACCOUNTS)
             for account in route['providers']:
                 self.assertEqual(account['args'], expected, label)
@@ -149,7 +149,7 @@ class LabelInstallerTests(unittest.TestCase):
         for prefix in ['gpt', 'gpt-astra']:
             for label in EFFORTS:
                 route = tomllib.loads((REPO / f'examples/models/{prefix}-{label}.toml').read_text())
-                model = 'gpt-5.6-sol' if prefix == 'gpt' else 'gpt-6-astra'
+                model = 'gpt-6-sol' if prefix == 'gpt' else 'gpt-6-astra'
                 expected = ['-m', model, '-c', f'model_reasoning_effort="{label}"']
                 for account in route['providers']:
                     self.assertEqual(account['args'], expected)
@@ -186,7 +186,7 @@ class LabelInstallerTests(unittest.TestCase):
             self.assertEqual(route['provider']['path'], str(PROVIDER))
             self.assertEqual([p['name'] for p in route['providers']], ACCOUNTS)
             for account in route['providers']:
-                model = 'gpt-6-astra' if family == 'astra' else f'gpt-5.6-{family}'
+                model = 'gpt-5.6-terra' if family == 'terra' else f'gpt-6-{family}'
                 expected = ['-m', model, '-c', f'model_reasoning_effort="{effort}"']
                 self.assertEqual(account['args'], expected)
                 self.assertEqual(account['interactive_args'], expected)
@@ -259,6 +259,14 @@ class LabelInstallerTests(unittest.TestCase):
         staged = tomllib.loads((self.root / 'stage/providers.toml.proposed').read_text())
         self.assertEqual(staged['codex3']['resume'], {'kind':'flag', 'flag':'--resume'})
         self.assertEqual(staged['codex3']['interactive_args'][0], 'interactive')
+        benchmark = tomllib.loads((self.root / 'stage/benchmark-models/codex-exec-bench.toml').read_text())
+        self.assertEqual([p['name'] for p in benchmark['providers']], ACCOUNTS)
+        for provider in benchmark['providers']:
+            expected = ['-m', 'gpt-6-luna', '-c', 'model_reasoning_effort="low"']
+            self.assertEqual(provider['args'], expected)
+            self.assertEqual(provider['interactive_args'], expected)
+        self.assertEqual((self.models / 'codex-exec-bench.toml').read_text(),
+                         '# isolated benchmark sentinel\n')
 
     def test_old_headless_provider_cannot_activate_pty_routes(self):
         old = self.root / 'headless-only-provider'

@@ -12,7 +12,7 @@ Codex-specific launch and rollout handling replace OpenCode's native boundaries.
 
 ## Models and accounts
 
-Standard labels `gpt-{low,medium,high,xhigh,max}` select `gpt-5.6-sol` with the
+Standard labels `gpt-{low,medium,high,xhigh,max}` select `gpt-6-sol` with the
 matching native reasoning effort. These routes do not cap high, xhigh, or max.
 The `gpt-astra-{low,medium,high,xhigh,max}` labels select `gpt-6-astra` with
 their matching native efforts and are distinct from the standard Sol aliases.
@@ -20,7 +20,7 @@ Native sub-agent delegation remains disabled for every label.
 
 `gpt-luna-{low,medium,high,xhigh,max}`, `gpt-terra-{low,medium,high,xhigh,max}`,
 and `gpt-sol-{low,medium,high,xhigh,max}` use the same Codex adapter and five-account
-pool with `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`, respectively. Each label selects its
+pool with `gpt-6-luna`, `gpt-5.6-terra`, and `gpt-6-sol`, respectively. Each label selects its
 corresponding native reasoning effort. No family registers `ultra`.
 
 Quota probing uses the installed `~/.local/bin/chatgpt-usage` adapter against
@@ -292,7 +292,7 @@ routes before applying them. Other model families, default routing, and benchmar
 routes remain unchanged. Install the updated provider and managed catalog first.
 
 `examples/benchmark-models/codex-exec-bench.toml` is a separately named
-`gpt-5.6-luna`/`low` live-test route. Use it in isolated runner configuration; the
+`gpt-6-luna`/`low` live-test route. Use it in isolated runner configuration; the
 production label installer does not activate benchmark routes.
 `python3 scripts/verify-live.py --account codex3 --run` checks a real Bash call
 and same-session resume in an isolated runner. See [scripts/README.md](scripts/README.md)

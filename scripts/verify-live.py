@@ -129,7 +129,7 @@ def main():
     (config/"config.toml").write_text(f'default_provider = {json.dumps(args.account)}\ndiagnostics_model = "codex-exec-bench"\n')
     if (source/"sessions.toml").exists():
         shutil.copy2(source/"sessions.toml", config/"sessions.toml")
-    label = labels["model_text"]("low", provider, "gpt-5.6-luna")
+    label = labels["model_text"]("low", provider, "gpt-6-luna")
     sections = label.split("[[providers]]")
     label = sections[0] + "".join("[[providers]]" + section for section in sections[1:] if f'name = "{args.account}"' in section)
     (config/"models/codex-exec-bench.toml").write_text(label)
@@ -148,7 +148,7 @@ def main():
     prompt.write_text(f"This is a bounded integration smoke test. Remember verification token {token} for the next turn. Use the available Agent Bash MCP tool exactly once with command `printf 'codex-bash-ok\\n'`. Then reply exactly `CODEX-SMOKE-OK codex-bash-ok`. Do not inspect files or launch child agents.\n")
     resume_prompt = output/"resume-prompt.txt"
     resume_prompt.write_text("This continues the same bounded test. Use the available Agent Bash MCP tool exactly once with command `printf 'codex-resume-ok\\n'`. Then reply `CODEX-RESUME-OK codex-resume-ok` followed by the verification token I gave in the previous turn. Do not inspect files or launch child agents.\n")
-    plan = {"model":"gpt-5.6-luna", "effort":"low", "account":args.account, "runner":str(runner), "config_root":str(config), "data_dir":str(output/"data"), "verification_token":token}
+    plan = {"model":"gpt-6-luna", "effort":"low", "account":args.account, "runner":str(runner), "config_root":str(config), "data_dir":str(output/"data"), "verification_token":token}
     (output/"plan.json").write_text(json.dumps(plan, indent=2)+"\n")
     print(f"Isolated verification directory: {output}", flush=True)
     if not args.run:

@@ -120,10 +120,10 @@ def main():
         (root/'requests.json').write_text(json.dumps(captured,indent=2)+'\n')
         assert len(captured)==2, f'Expected native Bash call + response, received {len(captured)} requests; artifacts: {root}'
         body=captured[0]
-        model=('gpt-5.6-luna' if args.label.startswith('gpt-luna-')
+        model=('gpt-6-luna' if args.label.startswith('gpt-luna-')
                else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
                else 'gpt-6-astra' if args.label.startswith('gpt-astra-')
-               else 'gpt-5.6-sol' if args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
+               else 'gpt-6-sol' if args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
         assert body['model']==model
         assert body['reasoning']['effort']==effort, body['reasoning']
         tools=list(body.get('tools',[]))

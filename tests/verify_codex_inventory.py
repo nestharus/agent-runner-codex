@@ -22,10 +22,10 @@ def main():
     parser.add_argument('--positive-control', action='store_true', help='Remove user-config isolation and prove the injected project MCP appears')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
-    model = ('gpt-5.6-luna' if args.label == 'codex-exec-bench' or args.label.startswith('gpt-luna-')
+    model = ('gpt-6-luna' if args.label == 'codex-exec-bench' or args.label.startswith('gpt-luna-')
              else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
              else 'gpt-6-astra' if args.label.startswith('gpt-astra-')
-             else 'gpt-5.6-sol' if args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
+             else 'gpt-6-sol' if args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
     effort = 'low' if args.label == 'codex-exec-bench' else args.label.rsplit('-', 1)[-1]
     route_args = ['-m', model, '-c', 'model_reasoning_effort='+json.dumps(effort)]
     captured = []
