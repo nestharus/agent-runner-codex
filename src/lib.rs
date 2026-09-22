@@ -16,3 +16,8 @@ mod session_turn_pages;
 pub mod terminal;
 pub use dispatch::write_invocation;
 pub use native_process::{run_native_effect_gate, NATIVE_EFFECT_GATE_ARG};
+
+/// Hashes of the integration assets compiled into this exact provider binary.
+pub fn embedded_integration_hashes() -> serde_json::Value {
+    registration::embedded_hashes()
+}

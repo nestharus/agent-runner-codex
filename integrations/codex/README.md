@@ -2,10 +2,12 @@
 
 `agent-bash-mcp.ts` exposes a single MCP tool, `bash`, and invokes the exact
 OpenCode implementation in `../opencode/tools/bash.ts`. That file is byte for
-byte equal to the installed OpenCode override checked on 2026-09-04 and the
-`agent-bash-tool` source recorded in `../opencode/BASH_SOURCE.json`. The source
-includes the installed workdir, direct cancellation, and type-overload fixes
-that were absent from `agent-bash-tool/main` at migration time.
+byte equal to the stable `agent-bash-tool/main` source at commit
+`dea893c984a944aec7e6b277a9adafec2882954d`, recorded in
+`../opencode/BASH_SOURCE.json`. The retained-output snapshot and
+`accept-output` path preserves acquired output across local receipt failures
+without replaying consumption. This source identity does not claim equality
+with an external OpenCode installation.
 
 The shim adapts only OpenCode's tool registration API. Bun compiles the pinned
 file in memory, resolving `@opencode-ai/plugin` to the local registration shim.
@@ -39,9 +41,12 @@ MCP cancellation notifications abort the corresponding adapter call. Stdin
 closure or process termination aborts active calls and gives their cancellation
 up to 1.5 seconds before exiting. Ordinary synchronous workloads remain leased
 to the MCP process; asynchronous headless child dispatches survive a normal
-turn exit exactly as in the source adapter. MCP always uses pipes and therefore
-follows the upstream headless delivery rules. The terminal provider must not
-claim interactive PTY semantics for this bridge.
+turn exit exactly as in the source adapter. MCP uses pipes in both modes.
+Managed interactive launches set `AGENT_RUNNER_CODEX_INTERACTIVE=1` to preserve
+the adapter's interactive delivery and owner leases. Headless identity uses the
+session file; interactive identity uses `_meta.threadId` and the session-binding
+acknowledgement. That acknowledgement does not confirm host consumption of the
+tool result.
 
 Run the deterministic tests with:
 
@@ -49,7 +54,15 @@ Run the deterministic tests with:
 python3 integrations/codex/test_mcp.py
 ```
 
-They check source equality, MCP discovery, argument rejection, environment and
-workdir propagation, native session binding, synchronous consumption, headless
-child delivery, cancellation, and stdin-close cleanup using a fake spooler.
+They check pinned source, MCP discovery, argument rejection, environment and
+workdir propagation, native session binding, snapshot-before-receipt ordering,
+receipt failure output retention, headless child delivery, cancellation, and
+stdin-close cleanup using a fake spooler.
 The tests do not issue model requests or run production Agent Runner jobs.
+
+The compiled provider embeds five integration assets. Interactive launches stage
+those bytes into a private generation. Headless exec selects the configured
+on-disk bridge, which loads its adjacent Bash. The installer compares its
+prospective assets with the binary's `--integration-hashes` output, then reads
+back installed files, runtime config and executable link. A future launch's
+effective policy and remote output acknowledgement require separate evidence.

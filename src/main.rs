@@ -20,6 +20,10 @@ fn main() {
             &mut std::io::stdout(),
         ));
     }
+    if args.len() == 2 && args[1] == "--integration-hashes" {
+        println!("{}", agent_runner_codex::embedded_integration_hashes());
+        return;
+    }
     let stdin = read_stdin_or_exit();
     let exit_code = write_request(&args, &stdin);
     std::process::exit(exit_code);

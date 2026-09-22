@@ -27,6 +27,19 @@ const ASSETS: &[(&str, &[u8])] = &[
     ),
 ];
 
+pub(crate) fn embedded_hashes() -> serde_json::Value {
+    let assets: serde_json::Map<String, serde_json::Value> = ASSETS
+        .iter()
+        .map(|(name, bytes)| {
+            (
+                name.to_string(),
+                json!(format!("{:x}", Sha256::digest(bytes))),
+            )
+        })
+        .collect();
+    json!({"schema": 1, "assets": assets})
+}
+
 fn failure() -> ProviderFailure {
     ProviderFailure::invalid_settings("", "registration_integration_unavailable",
         "Cannot safely prepare Codex registration/Bash integration. Run the selected release's scripts/install-provider.py with its built --binary and explicit dependency paths; do not upgrade native Codex or edit hook trust globally.", json!({}))

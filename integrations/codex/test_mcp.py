@@ -13,9 +13,9 @@ import threading
 import unittest
 
 HERE = Path(__file__).resolve().parent
-PINNED_SHA256 = "23dbb0dfd555e3ac720659e5b22a1fe0119c5ebe13102b09231ab47e4fd42c2d"
+PINNED_SHA256 = "64e82c7a8677122155d7e6a9955fa87dd8d31cc491b8d922a178b250c2e47bc8"
 FAKE = '''#!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps({"args": args, "cwd": os.getcwd(), "owner": os.environ.get("AGENT_BASH_OWNER_SESSION_ID"), "custom": os.environ.get("TEST_INHERITED_VALUE")}) + "\\n")
@@ -24,7 +24,15 @@ elif args[0] == "status": print(("RUNNING" if os.environ.get("FAKE_RUNNING") els
 elif args[0] == "mode": print("sync")
 elif args[0] == "cancel": print("cancel-accepted")
 elif args[0] == "list": print("[]")
-elif args[0] != "consume": sys.exit(1)
+elif args[0] == "snapshot":
+    output = b"fixture-output\\n"
+    snapshot = {"version": 1, "handle": "ab_test", "created_at_unix_ms": 1, "bytes": len(output), "sha256": hashlib.sha256(output).hexdigest(), "encoding": "hex"}
+    print(json.dumps({"snapshot": snapshot, "status": "DONE rc=0 handle=ab_test", "output": output.hex()}))
+elif args[0] == "accept-output":
+    if os.environ.get("FAKE_RECEIPT_FAILURE"): sys.exit(23)
+    snapshot = json.loads(args[3])
+    print(json.dumps({"version": 1, "handle": "ab_test", "local_receipt": "durable", "receipt_updated": True, "snapshot": snapshot, "remote_ack": "unconfirmed", "physical_drain": "unconfirmed"}))
+else: sys.exit(1)
 '''
 
 
@@ -36,10 +44,25 @@ class AdapterTest(unittest.TestCase):
         fake = self.root / "agent-bash"
         fake.write_text(FAKE)
         fake.chmod(0o755)
-        self.env = dict(os.environ)
-        for name in ("OULIPOLY_LIVE_SESSION_BIND_SOCKET", "OULIPOLY_LIVE_SESSION_BIND_TOKEN", "OULIPOLY_PARENT_INVOCATION", "AGENT_RUNNER_CODEX_SESSION_FILE", "AGENT_RUNNER_CODEX_SESSION_ID", "AGENT_RUNNER_CODEX_SESSION_BINDING", "AGENT_RUNNER_CODEX_INTERACTIVE", "AGENT_RUNNER_CODEX_REGISTRATION_CWD"):
-            self.env.pop(name, None)
-        self.env.update(AGENT_BASH_BIN=str(fake), FAKE_LOG=str(self.log), AGENT_RUNNER_CODEX_SESSION_ID="codex-native-test", AGENT_BASH_TOOL_POLL_MS="25", TEST_INHERITED_VALUE="inherited")
+        # Synthetic-only dependencies: never inherit registered providers or credentials.
+        home = self.root / "home"
+        home.mkdir()
+        runner = home / ".local/bin/agents"
+        runner.parent.mkdir(parents=True)
+        runner.write_text("#!/bin/sh\nprintf 'unexpected runner execution\\n' >&2\nexit 97\n")
+        runner.chmod(0o755)
+        self.runner = runner
+        self.env = {"PATH": "/usr/bin:/bin", "HOME": str(home)}
+        for name, directory in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
+                                ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache"),
+                                ("XDG_RUNTIME_DIR", "run"), ("CODEX_HOME", "codex"),
+                                ("TMPDIR", "tmp")):
+            path = self.root / directory
+            path.mkdir(mode=0o700)
+            self.env[name] = str(path)
+        self.env.update(AGENT_BASH_BIN=str(fake), AGENT_BASH_AGENT_RUNNER_BIN=str(runner),
+                        FAKE_LOG=str(self.log), AGENT_RUNNER_CODEX_SESSION_ID="codex-native-test",
+                        AGENT_BASH_TOOL_POLL_MS="25", TEST_INHERITED_VALUE="inherited")
         self.process = None
 
     def tearDown(self):
@@ -102,7 +125,48 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual((run["cwd"], run["owner"], run["custom"]), (str(self.root), "codex-native-test", "inherited"))
         self.assertIn("--cancel-on-owner-exit", run["args"])
         self.assertIn("root", run["args"])
-        self.assertTrue(any(call["args"][0] == "consume" for call in self.calls()))
+        operations = [call["args"][0] for call in self.calls()]
+        self.assertIn("snapshot", operations)
+        self.assertIn("accept-output", operations)
+        self.assertLess(operations.index("snapshot"), operations.index("accept-output"))
+        self.assertNotIn("consume", operations)
+
+    def test_retained_output_survives_receipt_failure(self):
+        self.env["FAKE_RECEIPT_FAILURE"] = "1"
+        self.start()
+        self.send("tools/call", {"name": "bash", "arguments": {"command": "printf probe"}})
+        result = self.receive()["result"]
+        self.assertNotIn("isError", result)
+        text = result["content"][0]["text"]
+        self.assertIn("fixture-output", text)
+        self.assertIn("local receipt: unconfirmed", text)
+        self.assertIn("remote ACK: unconfirmed; physical drain: unconfirmed", text)
+        self.assertIn("progression: unconfirmed", text)
+        operations = [call["args"][0] for call in self.calls()]
+        self.assertLess(operations.index("snapshot"), operations.index("accept-output"))
+        self.assertEqual(operations[-1], "accept-output")
+
+    def test_direct_child_dispatch_preserves_workdir(self):
+        workdir = self.root / "directory with spaces"
+        workdir.mkdir()
+        self.start()
+        self.send("tools/call", {"name": "bash", "arguments": {
+            "command": "agents -m gpt-low task", "workdir": str(workdir)}})
+        self.assertNotIn("isError", self.receive()["result"])
+        run = self.calls()[0]
+        self.assertEqual(run["cwd"], str(workdir))
+        self.assertIn(str(self.runner), run["args"][-1])
+
+    def test_terminal_handle_poll_retains_snapshot(self):
+        self.start()
+        self.send("tools/call", {"name": "bash", "arguments": {"handle": "ab_test"}})
+        result = self.receive()["result"]
+        self.assertNotIn("isError", result)
+        self.assertIn("durable bounded snapshot", result["content"][0]["text"])
+        operations = [call["args"][0] for call in self.calls()]
+        self.assertNotIn("run", operations)
+        self.assertNotIn("consume", operations)
+        self.assertLess(operations.index("snapshot"), operations.index("accept-output"))
 
     def test_headless_children_remain_async_and_pin_runner(self):
         self.start()
@@ -112,7 +176,7 @@ class AdapterTest(unittest.TestCase):
         self.assertIn("async", run)
         self.assertIn("tree", run)
         self.assertNotIn("--cancel-on-owner-exit", run)
-        self.assertIn("/.local/bin/agents", run[-1])
+        self.assertIn(str(self.runner), run[-1])
 
     def test_cancel_notification_cancels_supervised_command(self):
         self.env["FAKE_RUNNING"] = "1"
