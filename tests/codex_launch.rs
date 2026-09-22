@@ -34,7 +34,7 @@ impl Fixture {
             r#"#!/usr/bin/env python3
 import os,sys,json
 if sys.argv[1:] == ['--version']:
- print('codex-cli 0.153.4');sys.exit(0)
+ print('codex-cli 0.155.1');sys.exit(0)
 with open(os.environ['CALLS'],'a') as f: f.write(json.dumps({'argv':sys.argv[1:],'home':os.environ.get('CODEX_HOME'),'kept':os.environ.get('CUSTOM_SENTINEL'),'stdin':sys.stdin.read()})+'\n')
 for event in [{'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'},{'type':'turn.started'},{'type':'item.completed','item':{'type':'agent_message','text':'native-ok'}},{'type':'turn.completed','usage':{}}]: print(json.dumps(event),flush=True)
 "#,
@@ -98,11 +98,11 @@ fn model_request(f: &Fixture, label: &str, model: &str, effort: &str) -> Value {
 #[test]
 fn standard_sol_and_named_astra_argv_are_independently_checked() {
     for (label, model, effort) in [
-        ("gpt-low", "gpt-5.6-sol", "low"),
-        ("gpt-medium", "gpt-5.6-sol", "medium"),
-        ("gpt-high", "gpt-5.6-sol", "high"),
-        ("gpt-xhigh", "gpt-5.6-sol", "xhigh"),
-        ("gpt-max", "gpt-5.6-sol", "max"),
+        ("gpt-low", "gpt-6-sol", "low"),
+        ("gpt-medium", "gpt-6-sol", "medium"),
+        ("gpt-high", "gpt-6-sol", "high"),
+        ("gpt-xhigh", "gpt-6-sol", "xhigh"),
+        ("gpt-max", "gpt-6-sol", "max"),
         ("gpt-astra-low", "gpt-6-astra", "low"),
         ("gpt-astra-medium", "gpt-6-astra", "medium"),
         ("gpt-astra-high", "gpt-6-astra", "high"),
@@ -178,7 +178,7 @@ fn assert_stale_astra_rejected(effort: &str) {
     // Matching Sol provider_args must not launder stale Astra argv.
     request["params"]["model"]["provider_args"] = json!([
         "-m",
-        "gpt-5.6-sol",
+        "gpt-6-sol",
         "-c",
         format!("model_reasoning_effort=\"{effort}\"")
     ]);
@@ -198,9 +198,9 @@ fn assert_stale_astra_rejected(effort: &str) {
 fn named_model_families_pass_policy_and_launch_with_managed_tools_in_every_account() {
     for (family, model) in [
         ("astra", "gpt-6-astra"),
-        ("luna", "gpt-5.6-luna"),
+        ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-5.6-sol"),
+        ("sol", "gpt-6-sol"),
     ] {
         for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
@@ -332,12 +332,12 @@ fn policy_rejects_route_overrides_before_spawn() {
 fn named_model_families_reject_ultra_and_cross_model_or_effort_arguments() {
     for (family, model) in [
         ("astra", "gpt-6-astra"),
-        ("luna", "gpt-5.6-luna"),
+        ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-5.6-sol"),
+        ("sol", "gpt-6-sol"),
     ] {
         let cross_model = if model == "gpt-6-astra" {
-            "gpt-5.6-sol"
+            "gpt-6-sol"
         } else {
             "gpt-6-astra"
         };
@@ -400,7 +400,21 @@ fn native_success_without_turn_completed_does_not_report_assistant_completion() 
 }
 
 fn fake_native(f: &Fixture, body: &str) {
-    executable(&f.root.path().join("codex"), &format!("#!/usr/bin/env python3\nimport os,sys,json,time\nif sys.argv[1:] == ['--version']:\n print('codex-cli 0.153.4');sys.exit(0)\n{body}\n"));
+    executable(&f.root.path().join("codex"), &format!("#!/usr/bin/env python3\nimport os,sys,json,time\nif sys.argv[1:] == ['--version']:\n print('codex-cli 0.155.1');sys.exit(0)\n{body}\n"));
+}
+
+#[test]
+fn previous_native_version_is_rejected_before_launch() {
+    let f = Fixture::new();
+    let path = f.root.path().join("codex");
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("codex-cli 0.155.1", "codex-cli 0.153.4");
+    file(&path, &text);
+    let (code, events) = f.invoke("launch", &f.request);
+    assert_ne!(code, 0);
+    assert_eq!(events[0]["error"]["code"], "codex_version_unverified");
+    assert!(!f.root.path().join("calls.jsonl").exists());
 }
 
 fn now_ms() -> u64 {
@@ -771,12 +785,7 @@ fn sigterm_cancels_cli_and_reaps_native_process_group() {
 
 #[test]
 fn model_catalog_cannot_reenable_native_tools() {
-    for slug in [
-        "gpt-6-astra",
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-    ] {
+    for slug in ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol"] {
         let f = Fixture::new();
         let path = f.root.path().join("models.json");
         let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -799,12 +808,7 @@ fn model_catalog_cannot_reenable_native_tools() {
 
 #[test]
 fn missing_or_duplicate_model_metadata_rejects_launch_before_spawn() {
-    for slug in [
-        "gpt-6-astra",
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-    ] {
+    for slug in ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol"] {
         for duplicate in [false, true] {
             let f = Fixture::new();
             let path = f.root.path().join("models.json");

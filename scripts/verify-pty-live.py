@@ -149,12 +149,12 @@ def main():
         providers_file.write_text(provider_text + "\n" + prepare_helpers["selected_tables"](all_accounts, child_account))
         parent_model = "gpt-luna-low"
         (config/f"models/{parent_model}.toml").write_text((config/"models/codex-exec-bench.toml").read_text())
-        model = labels["model_text"]("low", args.provider.absolute(), "gpt-5.6-luna")
+        model = labels["model_text"]("low", args.provider.absolute(), "gpt-6-luna")
         parts = model.split("[[providers]]")
         model = parts[0] + "".join("[[providers]]" + part for part in parts[1:]
                                   if f'name = "{child_account}"' in part)
         (config/"models/codex-exec-bench.toml").write_text(model)
-    plan = {"mode":"pty_interactive", "model":"gpt-5.6-luna", "effort":"low", "account":args.account,
+    plan = {"mode":"pty_interactive", "model":"gpt-6-luna", "effort":"low", "account":args.account,
             "child_account":child_account,
             "runner":str(runner), "provider":str(args.provider.absolute()), "output_dir":str(output)}
     (output/"pty-plan.json").write_text(json.dumps(plan, indent=2)+"\n")

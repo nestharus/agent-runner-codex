@@ -26,7 +26,7 @@ impl Fixture {
 import os,sys,json
 with open(os.environ['CALLS']+'.all','a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['--version']:
- print('codex-cli 0.153.4');sys.exit(0)
+ print('codex-cli 0.155.1');sys.exit(0)
 if sys.argv[1:2] in [['app-server'], ['features'], ['doctor'], ['debug']]:
  sys.exit(93) # No extra config/runtime startup is part of interactive preparation.
 with open(os.environ['CALLS'],'w') as f:
@@ -114,9 +114,9 @@ with open(os.environ['CALLS'],'w') as f:
 fn named_model_interactive_routes_preserve_every_effort_and_account() {
     for (family, model) in [
         ("astra", "gpt-6-astra"),
-        ("luna", "gpt-5.6-luna"),
+        ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-5.6-sol"),
+        ("sol", "gpt-6-sol"),
     ] {
         for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
@@ -225,7 +225,7 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
         "features.multi_agent=false",
         "mcp_servers.agent_bash.enabled_tools=[\"bash\"]",
         "developer_instructions=\"account extra instructions\"",
-        "gpt-5.6-luna",
+        "gpt-6-luna",
         "model_reasoning_effort=\"low\"",
     ] {
         assert!(argv.contains(&json!(value)), "{value}");
@@ -243,12 +243,33 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
 }
 
 #[test]
+fn previous_native_version_is_rejected_before_tui_spawn() {
+    let f = Fixture::new();
+    let path = f.root.path().join("native");
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("codex-cli 0.155.1", "codex-cli 0.153.4");
+    fs::write(&path, text).unwrap();
+    let result = f.command().output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("codex-cli 0.155.1"));
+    assert!(!f.root.path().join("calls.json").exists());
+    assert_eq!(
+        fs::read_to_string(f.root.path().join("calls.json.all"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn default_and_exact_legacy_model_routes_are_managed() {
     for (args, model, effort) in [
-        (vec![], "gpt-5.6-sol", "xhigh"),
+        (vec![], "gpt-6-sol", "xhigh"),
         (
-            vec!["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"max\""],
-            "gpt-5.6-luna",
+            vec!["-m", "gpt-6-luna", "-c", "model_reasoning_effort=\"max\""],
+            "gpt-6-luna",
             "max",
         ),
     ] {
@@ -270,7 +291,7 @@ fn standard_sol_and_named_astra_routes_remain_distinct() {
         ("gpt-xhigh", "xhigh"),
         ("gpt-max", "max"),
     ] {
-        assert_model_interactive(&["--model", label], "gpt-5.6-sol", effort);
+        assert_model_interactive(&["--model", label], "gpt-6-sol", effort);
     }
     for (label, effort) in [
         ("gpt-astra-low", "low"),
@@ -451,7 +472,7 @@ fn headless_policy_accepts_only_its_exact_managed_executable_carrier() {
     let f = Fixture::new();
     let binary = Path::new(env!("CARGO_BIN_EXE_agent-runner-codex"));
     for (carrier, accepted) in [(binary, true), (f.root.path(), false)] {
-        let args = ["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"low\""];
+        let args = ["-m", "gpt-6-luna", "-c", "model_reasoning_effort=\"low\""];
         let mut argv = vec![
             json!(carrier),
             json!("exec"),

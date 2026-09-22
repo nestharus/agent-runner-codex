@@ -152,7 +152,7 @@ fn replay_journal<W: Write>(
     std::io::copy(&mut file, writer).map_err(io_failure)?;
     writer.flush().map_err(io_failure)
 }
-const PINNED_VERSION: &str = "codex-cli 0.153.4";
+const PINNED_VERSION: &str = "codex-cli 0.155.1";
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_CLOSE_GRACE: Duration = Duration::from_secs(2);
 const MAX_VERSION_BYTES: u64 = 64 * 1024;

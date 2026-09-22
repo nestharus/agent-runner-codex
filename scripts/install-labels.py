@@ -198,7 +198,7 @@ def main():
     )))
     family = "luna" if args.luna_labels else "terra" if args.terra_labels else "sol" if (args.sol_labels or args.standard_labels) else "astra"
     prefix = "gpt" if args.standard_labels else f"gpt-{family}"
-    model = f"gpt-5.6-{family}" if family != "astra" else "gpt-6-astra"
+    model = "gpt-5.6-terra" if family == "terra" else f"gpt-6-{family}"
     models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path, model) for effort in EFFORTS}
     models = {name: staged_model_text(args.config_root/"models"/name, text)
               for name, text in models.items()}
@@ -216,7 +216,7 @@ def main():
     (args.stage_root/"models.patch").write_text("".join(model_diffs))
     benchmarks_stage = args.stage_root/"benchmark-models"
     benchmarks_stage.mkdir(exist_ok=True)
-    (benchmarks_stage/"codex-exec-bench.toml").write_text(model_text("low", provider_path, "gpt-5.6-luna"))
+    (benchmarks_stage/"codex-exec-bench.toml").write_text(model_text("low", provider_path, "gpt-6-luna"))
     if args.apply:
         if not provider_path.is_file():
             raise SystemExit(f"Codex provider is not installed at {provider_path}")

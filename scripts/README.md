@@ -76,7 +76,7 @@ python3 scripts/install-labels.py --standard-labels \
   --stage-root /tmp/codex-standard-labels --apply
 ```
 
-Review `models.patch` before applying. Every standard label selects `gpt-5.6-sol`
+Review `models.patch` before applying. Every standard label selects `gpt-6-sol`
 at the matching native effort, including high, xhigh, and max. The managed
 no-model PTY default remains `gpt-xhigh`, now Sol/xhigh. The preserved
 `gpt-astra-*` routes select Astra at matching efforts; exact native PTY argument
@@ -111,7 +111,7 @@ python3 scripts/install-labels.py --luna-labels --stage-root /tmp/codex-luna-lab
 python3 scripts/install-labels.py --luna-labels --stage-root /tmp/codex-luna-labels --apply
 ```
 
-This mode uses `gpt-5.6-luna` with the matching effort and all five Codex accounts.
+This mode uses `gpt-6-luna` with the matching effort and all five Codex accounts.
 It creates missing routes and saves replaced routes under
 `backups/codex-luna-*/models/`.
 
@@ -127,7 +127,7 @@ Terra uses the same account pool and saves replaced routes under
 `backups/codex-terra-*/models/`.
 
 To register `gpt-sol-low`, `gpt-sol-medium`, `gpt-sol-high`, `gpt-sol-xhigh`,
-and `gpt-sol-max` with `gpt-5.6-sol`:
+and `gpt-sol-max` with `gpt-6-sol`:
 
 ```bash
 python3 scripts/install-labels.py --sol-labels --stage-root /tmp/codex-sol-labels
@@ -144,7 +144,7 @@ it changes any installed configuration, and preserves unrelated labels and the
 configured default provider.
 
 `benchmark-models/codex-exec-bench.toml` is generated separately and never
-installed into production routing. It uses `gpt-5.6-luna` at low reasoning for
+installed into production routing. It uses `gpt-6-luna` at low reasoning for
 the repository's live-test requirement. Prepare an isolated runner, default
 model directory, and state directory with:
 
@@ -194,13 +194,15 @@ provider. No credentials are copied or created by this script.
 
 `tests/verify_codex_inventory.py --binary /exact/provider --label gpt-high`
 checks the managed headless native request against a loopback Responses server.
-Repeat with `gpt-xhigh`, `gpt-max`, and `gpt-astra-xhigh` to cover both Sol and
-Astra routes at their matching native efforts.
+Repeat with `gpt-xhigh`, `gpt-luna-low`, `codex-exec-bench`, `gpt-max`, and
+`gpt-astra-xhigh` to cover Sol, Luna, the benchmark, and Astra routes at their
+matching native efforts.
 Use `--output-dir /new/evidence/path` to retain isolated configs, request/response
 bodies and raw provider results. `tests/verify_codex_tui_inventory.py --binary
 /exact/provider --no-model --output-dir /tmp/short-new-path` checks the actual
-no-model PTY at Sol/xhigh, including managed tools and native session binding;
-use a short path for its Unix socket. These checks spend no model tokens and
+no-model PTY at Sol/xhigh, including managed tools and native session binding.
+Repeat with `--label gpt-luna-low` to check the Luna PTY route. Use a short path
+for its Unix socket. These checks spend no model tokens and
 use new test homes, not native credentials. They do not prove service availability.
 
 Set `CODEX_TEST_EVIDENCE_DIR` to a fresh absolute directory to retain fake launch
