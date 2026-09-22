@@ -9,10 +9,15 @@ python3 scripts/install-provider.py
 `~/.config/oulipoly-agent-runner/agent-runner-codex`, writes the six runtime
 configuration paths, and creates `~/.local/bin/agent-runner-codex`. It discovers
 Codex, Bun, Agent Bash, and Agent Runner from `PATH` and uses `~/ai/AGENTS.md`
-as the system prompt. Before writing anything, it verifies that the installed
-OpenCode Bash override exactly matches the vendored source and recorded SHA-256.
-Previous artifacts, runtime config, and executable link are saved under the
-runner configuration root's `backups/` directory.
+as the system prompt. Before writing anything, it verifies the vendored Codex
+Bash against the pinned stable source manifest, checks all integration assets
+against `--integration-hashes` from the selected binary, and refuses to
+overwrite an installed Codex Bash with an unrecognized digest. It does not
+inspect `~/.config/opencode`. Previous artifacts, runtime config, and
+executable link are saved under the runner configuration root's `backups/`
+directory. Individual replacements are atomic; a failed replacement or readback
+attempts to restore that backup. There is no single atomic transaction spanning
+the binary, integration directory, config, and link.
 
 The installation leaves model routing, Codex authentication, and global Codex
 configuration unchanged. To test installation in isolated directories:
@@ -24,8 +29,10 @@ python3 scripts/install-provider.py \
   --bin-dir /tmp/codex-install/bin
 ```
 
-Use `--binary` for an alternate already-built artifact. Runtime paths and the
-installed OpenCode override path also have explicit options; see `--help`.
+Use `--binary` for an alternate already-built artifact. The selected binary
+must embed the exact prospective integration assets. Runtime paths have
+explicit options; see `--help`. An older installer cannot enforce this guard,
+so a rollback must use this release's installer and a reviewed matching bundle.
 The runtime configuration always lives at
 `CONFIG_ROOT/agent-runner-codex/config.toml`, even with a separate artifact root.
 

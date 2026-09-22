@@ -70,9 +70,13 @@ agents use the normal `agents` command through Bash, preserving Agent Runner's
 contract rather than translating Codex native sub-agent handles.
 
 `integrations/opencode/tools/bash.ts` is the **unchanged, byte-identical**
-OpenCode Bash override. The Codex MCP adapter imports its actual implementation;
-it does not maintain a second shell implementation. The provenance manifest and
-integration tests record the exact source and installed-byte comparison. MCP
+`agent-bash-tool` Bash source at commit
+`dea893c984a944aec7e6b277a9adafec2882954d` (SHA-256
+`64e82c7a8677122155d7e6a9955fa87dd8d31cc491b8d922a178b250c2e47bc8`).
+The Codex MCP adapter loads this adjacent file; it does not maintain a second
+shell implementation. The provenance manifest records source identity, while
+the installer checks the prospective package and installed Codex paths. An
+external installed OpenCode override is not an installation prerequisite. MCP
 receives inherited environment variable names via `env_vars`, avoiding values in
 command arguments. The native thread ID is handed to the tool through a private
 per-invocation session file for headless launches. PTY launches use Codex's
