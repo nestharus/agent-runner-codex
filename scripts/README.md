@@ -230,11 +230,19 @@ The TUI producer provisions a fake spooler, a fail-closed fake runner, a
 synthetic system prompt and a non-inherited environment. It checks the native
 request's model (Sol and Luna now use GPT-6), effort, tools, instructions,
 exact rollout identity and native session binding. For the tool result, it
-requires bounded snapshot acquisition, matching local receipt request, later
-progression and the response body; fake receipt success cannot prove durable
-storage. Session binding acknowledges identity, not consumption of the tool
-body. Remote acknowledgement and physical drain remain unconfirmed. Use a new,
-short output directory for its Unix socket.
+requires the exact supervised `printf inventory-tool-call` dispatch before
+bounded snapshot acquisition, the same bound owner on every fake-spooler call,
+the `ab_test` handle through observation and receipt, later progression, and
+the response body. The fake spooler returns fixed bytes, so this checks the
+recorded command-to-output relationship but cannot prove shell execution or
+durable storage. Session binding acknowledges identity, not consumption of the
+tool body. Remote acknowledgement and physical drain remain unconfirmed. Use
+a new, short output directory for its Unix socket.
+
+`python3 tests/test_tui_inventory_oracle.py -v` runs five pure in-memory checks
+for the fixed-output oracle, including command, order, handle, and owner-drift
+negative controls. It starts no native host and does not replace the private
+synthetic suite or native inventory run.
 
 The synthetic suite also needs that *externally established* boundary. Inside
 it, set `CODEX_INVENTORY_TEST_BUN` to an absolute private Bun executable and

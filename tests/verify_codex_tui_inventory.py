@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import runpy
 import select
 import signal
@@ -58,14 +59,32 @@ def fixture_environment(root):
 
 
 def assert_retained_result(calls, inputs):
-    """Check this fake snapshot/local receipt, never remote settlement or durability."""
+    """Check recorded fake dispatch/snapshot/receipt, never real durability or drain."""
+    assert calls and isinstance(calls[0].get("owner"), str) and calls[0]["owner"], calls
+    assert all(call.get("owner") == calls[0]["owner"] for call in calls), calls
     operations = [call["args"][0] for call in calls]
     assert "consume" not in operations, calls
     assert operations.count("run") == 1, calls
     assert operations.count("snapshot") == operations.count("accept-output") == 1, calls
+    dispatched = operations.index("run")
     acquired = operations.index("snapshot")
     accepted = operations.index("accept-output")
-    assert acquired < accepted, calls
+    assert dispatched == 0 and dispatched < acquired < accepted, calls
+    run_args = calls[dispatched]["args"]
+    assert (len(run_args) == 12 and
+            run_args[:3] == ["run", "--cancel-on-owner-exit", "--owner-pid"] and
+            isinstance(run_args[3], str) and re.fullmatch(r"[1-9][0-9]*", run_args[3]) and
+            run_args[4:] == ["--completion-scope", "root", "--delivery", "sync",
+                             "--", "bash", "-lc", "printf inventory-tool-call"]), calls
+    for call in calls:
+        argv = call["args"]
+        if argv[0] == "status":
+            assert argv in (["status", "--tail-bytes", "0", "--observe-only", "ab_test"],
+                            ["status", "--tail-bytes", "0", "ab_test"]), calls
+        elif argv[0] == "mode":
+            assert argv == ["mode", "ab_test"], calls
+        else:
+            assert argv[0] in ("run", "snapshot", "accept-output"), calls
     assert calls[acquired]["args"] == ["snapshot", "ab_test"], calls
     receipt_args = calls[accepted]["args"]
     assert receipt_args[:3] == ["accept-output", "ab_test", "--snapshot"] and len(receipt_args) == 4, calls
@@ -91,6 +110,7 @@ def assert_retained_result(calls, inputs):
         output = "".join(item["text"] for item in output if item.get("type") == "text")
     assert isinstance(output, str), output
     header, body = output.split("\n--- output ---\n", 1)
+    assert header.splitlines()[0] == "DONE rc=0 handle=ab_test", header
     assert body == FIXTURE_OUTPUT.decode(), body
     assert "local receipt: durable bounded snapshot; remote ACK: unconfirmed; physical drain: unconfirmed" in header, header
     assert "progression: requested (not remote settlement evidence)" in header, header
