@@ -47,7 +47,7 @@ explicit additions. Credentials stay in their existing native account homes.
 
 ## Native execution and tools
 
-The adapter is pinned to **Codex CLI 0.153.4**, using stable
+The adapter is pinned to **Codex CLI 0.155.1**, using stable
 `codex exec --json`, `codex exec resume`, and the interactive Codex CLI inside
 Agent Runner's PTY. An unverified CLI version is rejected
 before model execution. It does not depend on app-server dynamic tools.

@@ -19,6 +19,8 @@ import termios
 import threading
 import time
 
+INVOCATION_UUID = '11111111-2222-4333-8444-555555555555'
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -79,19 +81,21 @@ def main():
     listener.listen(2)
     listener.settimeout(40)
     def acknowledge():
-        try:
-            connection, _ = listener.accept()
-            with connection:
-                report = json.loads(connection.makefile('rb').readline())
-                reports.append(report)
-                connection.sendall((json.dumps({'ok':True,'session_id':report['provider_session_id']})+'\n').encode())
-        except (OSError, ValueError) as error:
-            reports.append({'error':str(error)})
+        while True:
+            try:
+                connection, _ = listener.accept()
+                with connection:
+                    report = json.loads(connection.makefile('rb').readline())
+                    reports.append(report)
+                    connection.sendall((json.dumps({'ok':True,'session_id':report['provider_session_id'],'provider_session_id':report['provider_session_id'],'agent_runner_invocation_id':report['invocation_uuid']})+'\n').encode())
+            except (OSError, ValueError) as error:
+                reports.append({'error':str(error)})
+                return
     threading.Thread(target=acknowledge, daemon=True).start()
     environment = dict(os.environ)
     for key in ['OULIPOLY_PARENT_INVOCATION','OULIPOLY_LIVE_SESSION_BIND_SOCKET','OULIPOLY_LIVE_SESSION_BIND_TOKEN','AGENT_RUNNER_CODEX_SESSION_ID','AGENT_RUNNER_CODEX_SESSION_FILE','AGENT_RUNNER_CODEX_SESSION_BINDING','AGENT_RUNNER_CODEX_INTERACTIVE']:
         environment.pop(key,None)
-    environment.update({'HOME':str(root),'TERM':'xterm-256color','FAKE_LOG':str(root/'bash-calls.jsonl'),'AGENT_BASH_TOOL_POLL_MS':'25','OULIPOLY_PARENT_INVOCATION':json.dumps({'id':'native-tui-inventory'}),'OULIPOLY_LIVE_SESSION_BIND_SOCKET':str(root/'binding.sock'),'OULIPOLY_LIVE_SESSION_BIND_TOKEN':'local-inventory-token','CODEX_THREAD_ID':'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'})
+    environment.update({'HOME':str(root),'TERM':'xterm-256color','FAKE_LOG':str(root/'bash-calls.jsonl'),'AGENT_BASH_TOOL_POLL_MS':'25','OULIPOLY_PARENT_INVOCATION':json.dumps({'id':INVOCATION_UUID}),'OULIPOLY_LIVE_SESSION_BIND_SOCKET':str(root/'binding.sock'),'OULIPOLY_LIVE_SESSION_BIND_TOKEN':'local-inventory-token','CODEX_THREAD_ID':'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'})
     pid, master = pty.fork()
     if pid == 0:
         fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
@@ -141,7 +145,8 @@ def main():
         assert any('TUI-DEVELOPER-SENTINEL' in t for t in texts),'Account instructions missing'
         calls=[json.loads(line) for line in (root/'bash-calls.jsonl').read_text().splitlines()]
         session=reports[0]['provider_session_id']
-        assert reports==[{'schema_version':1,'token':'local-inventory-token','invocation_uuid':'native-tui-inventory','provider_session_id':session}],reports
+        expected_report={'schema_version':1,'token':'local-inventory-token','invocation_uuid':INVOCATION_UUID,'provider_session_id':session}
+        assert len(reports)>=2 and all(report==expected_report for report in reports),reports
         assert session!=environment['CODEX_THREAD_ID']
         assert calls[0]['owner']==session,calls
         assert any(c['args'][0]=='consume' for c in calls),calls

@@ -23,7 +23,7 @@ NATIVE = r'''#!/usr/bin/python3
 import json,os,sys
 with open(os.environ['CALLS']+'.all','a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['--version']:
- print('codex-cli 0.153.4');sys.exit(0)
+ print('codex-cli 0.155.1');sys.exit(0)
 if sys.argv[1:2] in [['app-server'], ['features'], ['doctor'], ['debug']]:
  sys.exit(93) # No extra config/runtime startup is part of interactive preparation.
 with open(os.environ['CALLS'],'w') as f: json.dump({'argv':sys.argv[1:],'env':dict(os.environ)},f)

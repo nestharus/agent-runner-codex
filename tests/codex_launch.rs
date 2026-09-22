@@ -34,7 +34,7 @@ impl Fixture {
             r#"#!/usr/bin/env python3
 import os,sys,json
 if sys.argv[1:] == ['--version']:
- print('codex-cli 0.153.4');sys.exit(0)
+ print('codex-cli 0.155.1');sys.exit(0)
 with open(os.environ['CALLS'],'a') as f: f.write(json.dumps({'argv':sys.argv[1:],'home':os.environ.get('CODEX_HOME'),'kept':os.environ.get('CUSTOM_SENTINEL'),'stdin':sys.stdin.read()})+'\n')
 for event in [{'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'},{'type':'turn.started'},{'type':'item.completed','item':{'type':'agent_message','text':'native-ok'}},{'type':'turn.completed','usage':{}}]: print(json.dumps(event),flush=True)
 "#,
@@ -400,7 +400,21 @@ fn native_success_without_turn_completed_does_not_report_assistant_completion() 
 }
 
 fn fake_native(f: &Fixture, body: &str) {
-    executable(&f.root.path().join("codex"), &format!("#!/usr/bin/env python3\nimport os,sys,json,time\nif sys.argv[1:] == ['--version']:\n print('codex-cli 0.153.4');sys.exit(0)\n{body}\n"));
+    executable(&f.root.path().join("codex"), &format!("#!/usr/bin/env python3\nimport os,sys,json,time\nif sys.argv[1:] == ['--version']:\n print('codex-cli 0.155.1');sys.exit(0)\n{body}\n"));
+}
+
+#[test]
+fn previous_native_version_is_rejected_before_launch() {
+    let f = Fixture::new();
+    let path = f.root.path().join("codex");
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("codex-cli 0.155.1", "codex-cli 0.153.4");
+    file(&path, &text);
+    let (code, events) = f.invoke("launch", &f.request);
+    assert_ne!(code, 0);
+    assert_eq!(events[0]["error"]["code"], "codex_version_unverified");
+    assert!(!f.root.path().join("calls.jsonl").exists());
 }
 
 fn now_ms() -> u64 {

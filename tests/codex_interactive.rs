@@ -26,7 +26,7 @@ impl Fixture {
 import os,sys,json
 with open(os.environ['CALLS']+'.all','a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['--version']:
- print('codex-cli 0.153.4');sys.exit(0)
+ print('codex-cli 0.155.1');sys.exit(0)
 if sys.argv[1:2] in [['app-server'], ['features'], ['doctor'], ['debug']]:
  sys.exit(93) # No extra config/runtime startup is part of interactive preparation.
 with open(os.environ['CALLS'],'w') as f:
@@ -240,6 +240,27 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
         assert!(!argv.contains(&json!(value)));
     }
     assert_eq!(&argv[argv.len() - 2..], &[json!("--"), json!("first turn")]);
+}
+
+#[test]
+fn previous_native_version_is_rejected_before_tui_spawn() {
+    let f = Fixture::new();
+    let path = f.root.path().join("native");
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("codex-cli 0.155.1", "codex-cli 0.153.4");
+    fs::write(&path, text).unwrap();
+    let result = f.command().output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("codex-cli 0.155.1"));
+    assert!(!f.root.path().join("calls.json").exists());
+    assert_eq!(
+        fs::read_to_string(f.root.path().join("calls.json.all"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
 }
 
 #[test]
