@@ -205,12 +205,76 @@ Repeat with `gpt-xhigh`, `gpt-luna-low`, `codex-exec-bench`, `gpt-max`, and
 `gpt-astra-xhigh` to cover Sol, Luna, the benchmark, and Astra routes at their
 matching native efforts.
 Use `--output-dir /new/evidence/path` to retain isolated configs, request/response
-bodies and raw provider results. `tests/verify_codex_tui_inventory.py --binary
-/exact/provider --no-model --output-dir /tmp/short-new-path` checks the actual
-no-model PTY at Sol/xhigh, including managed tools and native session binding.
-Repeat with `--label gpt-luna-low` to check the Luna PTY route. Use a short path
-for its Unix socket. These checks spend no model tokens and
-use new test homes, not native credentials. They do not prove service availability.
+bodies and raw provider results.
+Its result reports `configured_prompt_match` as an exact developer-text item or
+matching top-level instructions after trailing whitespace is removed.
+`additional_developer_text_observed` records other nonempty developer text; the
+prompt check establishes configured prompt presence, not exclusivity of the
+native instruction set.
+
+The native TUI inventory producer requires explicit private dependencies:
+
+```sh
+python3 tests/verify_codex_tui_inventory.py \
+  --boundary-report /private/harness/boundary.json --binary /private/provider \
+  --native-codex /private/native-codex --bun /private/bun \
+  --no-model --output-dir /tmp/short-new-path
+```
+
+Run it only inside an externally established private user/network/mount/PID
+namespace with production HOME, /root, /run and /tmp masked; use env-i,
+private HOME/XDG/CODEX state, read-only candidate dependencies, dropped DAC
+readsearch/override capabilities and PID1 reaping. Probe the boundary before
+bringing up private loopback. Loopback is not a sandbox; do not use installed
+production Codex or Runner, and do not manufacture a boundary report. The
+separate headless inventory producer has ambient lookups and does not acquire
+this isolation by virtue of the TUI changes. Neither check proves service
+availability or effective policy outside the observed launch.
+
+The TUI producer provisions a fake spooler, a fail-closed fake runner, a
+synthetic system prompt and a non-inherited environment. It checks the native
+request's model (Sol and Luna now use GPT-6), effort, tools, configured prompt,
+exact rollout identity and native session binding. In `result.json`,
+`configured_prompt_match` identifies an exact developer-text item or matching
+top-level instructions after trailing whitespace is removed;
+`additional_developer_text_observed` reports other nonempty developer text.
+The prompt check allows native policy text alongside the configured prompt; it
+does not claim that the complete developer instruction set equals that prompt.
+For the tool result, it
+requires the exact supervised `printf inventory-tool-call` dispatch before
+bounded snapshot acquisition, the same bound owner on every fake-spooler call,
+the `ab_test` handle through observation and receipt, later progression, and
+the response body. The fake spooler returns fixed bytes, so this checks the
+recorded command-to-output relationship but cannot prove shell execution or
+durable storage. Session binding acknowledges identity, not consumption of the
+tool body. Remote acknowledgement and physical drain remain unconfirmed. Use
+a new, short output directory for its Unix socket.
+
+`python3 tests/test_tui_inventory_oracle.py -v` runs eight pure in-memory checks
+for the prompt report and fixed-output oracle, including command, order, handle,
+and owner-drift negative controls. It starts no native host and does not replace
+the private synthetic suite or native inventory run.
+
+The synthetic suite also needs that *externally established* boundary. Inside
+it, set `CODEX_INVENTORY_TEST_BUN` to an absolute private Bun executable and
+`CODEX_INVENTORY_TEST_PRIVATE_ROOT` to a fresh short private harness root with
+an actual `boundary.json` probe report. It must record true `masks`,
+`read_only_inputs` and `DAC_denied`, and the current user/net/mnt/pid identities
+from `/proc/self/ns`. The four producer failure controls compare namespace
+identities and create unique `failure-cases/` directories without reusing them.
+The suite does not create or independently prove this boundary. Then run:
+
+```sh
+python3 tests/test_tui_inventory_producer.py -v
+```
+
+Six synthetic bridge/oracle tests check retained output, malformed/order/hash
+controls, identity ACK and receipt failures. Four producer PTY/HTTP failure
+controls use fake provider and native executables to check request retention,
+early exits and validation failure; neither set tests actual native Codex. A
+Bun-only host run or a partial six-test selection is not the ten-test gate.
+Do not treat an unexecuted suite as a pass; retain the gap until an externally
+established private boundary and fake-provider setup are actually available.
 
 Set `CODEX_TEST_EVIDENCE_DIR` to a fresh absolute directory to retain fake launch
 and interactive fixture configs/native argv plus installer fixtures/backups.

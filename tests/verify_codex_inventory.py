@@ -14,6 +14,21 @@ import tempfile
 import threading
 
 
+def prompt_evidence(body, instructions):
+    """Report the configured prompt's match without claiming instruction exclusivity."""
+    texts = [''.join(c.get('text', '') for c in item.get('content', []) if isinstance(c, dict))
+             for item in body.get('input', [])
+             if item.get('role') == 'developer' and isinstance(item.get('content'), list)]
+    developer_item_match = instructions in texts
+    top_level_match = not developer_item_match and body.get('instructions', '').rstrip() == instructions
+    assert developer_item_match or top_level_match, 'System instruction source differs'
+    return {
+        'configured_prompt_match': ('exact_developer_item' if developer_item_match
+                                    else 'top_level_instructions_after_trim'),
+        'additional_developer_text_observed': any(text and text != instructions for text in texts),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path('target/debug/agent-runner-codex'))
@@ -114,9 +129,9 @@ def main():
                 assert 'mcp__project_extra.bash' in names, 'Positive control failed to expose project tool'
             assert set(names) <= allowed, f'Unexpected native tools: {set(names)-allowed}'
             instructions = Path(runtime['system_prompt_file']).read_text().rstrip()
-            texts = [''.join(c.get('text','') for c in i.get('content',[]) if isinstance(c,dict)) for i in body.get('input',[]) if i.get('role')=='developer' and isinstance(i.get('content'),list)]
-            assert instructions in texts or body.get('instructions','').rstrip()==instructions, 'System instruction source differs'
-            print(json.dumps({'passed': True, 'label': args.label, 'model': body.get('model'), 'effort': wire_effort, 'tools': names, 'system_prompt_exact': True}, indent=2))
+            prompt_report = prompt_evidence(body, instructions)
+            print(json.dumps({'passed': True, 'label': args.label, 'model': body.get('model'),
+                              'effort': wire_effort, 'tools': names, **prompt_report}, indent=2))
     finally:
         server.shutdown()
 

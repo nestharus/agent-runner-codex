@@ -126,6 +126,11 @@ External executable dependencies must exist, be executable, and not be writable
 by other users. No downloads, native upgrades, global backups, project trust edits,
 or broad hook-trust bypass are performed.
 
+The optional TUI inventory producer and its ten-test synthetic harness have
+separate private-namespace prerequisites; see `scripts/README.md` § Offline
+verification evidence. A fake-bridge check does not establish native
+host consumption of a tool result.
+
 The selected generated `CODEX_HOME/config.toml` declares both synchronous hooks
 and their exact path-qualified native declaration trust hashes. These hashes cover
 normalized declarations, **not helper bytes**; release-payload staging provides
