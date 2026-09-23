@@ -206,6 +206,11 @@ Repeat with `gpt-xhigh`, `gpt-luna-low`, `codex-exec-bench`, `gpt-max`, and
 matching native efforts.
 Use `--output-dir /new/evidence/path` to retain isolated configs, request/response
 bodies and raw provider results.
+Its result reports `configured_prompt_match` as an exact developer-text item or
+matching top-level instructions after trailing whitespace is removed.
+`additional_developer_text_observed` records other nonempty developer text; the
+prompt check establishes configured prompt presence, not exclusivity of the
+native instruction set.
 
 The native TUI inventory producer requires explicit private dependencies:
 
