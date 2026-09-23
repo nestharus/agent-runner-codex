@@ -202,6 +202,21 @@ def explicit_executable(value):
     return path.resolve()
 
 
+def prompt_evidence(body, instructions):
+    """Describe the configured prompt's observed match, not all native policy text."""
+    texts = [''.join(c.get('text', '') for c in item.get('content', []) if isinstance(c, dict))
+             for item in body.get('input', [])
+             if item.get('role') == 'developer' and isinstance(item.get('content'), list)]
+    developer_item_match = instructions in texts
+    top_level_match = not developer_item_match and body.get('instructions', '').rstrip() == instructions
+    assert developer_item_match or top_level_match, 'System prompt differs'
+    return {
+        'configured_prompt_match': ('exact_developer_item' if developer_item_match
+                                    else 'top_level_instructions_after_trim'),
+        'additional_developer_text_observed': any(text and text != instructions for text in texts),
+    }, texts
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--boundary-report', type=Path, required=True, help='Externally established private namespace probe; not created by this script')
@@ -319,8 +334,7 @@ def main():
         allowed={'mcp__agent_bash.bash','functions.request_user_input','functions.list_mcp_resources','functions.list_mcp_resource_templates','functions.read_mcp_resource'}
         assert 'mcp__agent_bash.bash' in names and set(names)<=allowed,names
         instructions=Path(runtime['system_prompt_file']).read_text().rstrip()
-        texts=[''.join(c.get('text','') for c in i.get('content',[]) if isinstance(c,dict)) for i in body.get('input',[]) if i.get('role')=='developer' and isinstance(i.get('content'),list)]
-        assert instructions in texts or body.get('instructions','').rstrip()==instructions,'System prompt differs'
+        prompt_report, texts=prompt_evidence(body,instructions)
         assert any('TUI-DEVELOPER-SENTINEL' in t for t in texts),'Account instructions missing'
         calls=[json.loads(line) for line in (root/'bash-calls.jsonl').read_text().splitlines()]
         session=reports[0]['provider_session_id']
@@ -336,7 +350,7 @@ def main():
             if first.get('payload',{}).get('id')==session:matches.append(path)
         assert len(matches)==1,matches
         assert json.loads(matches[0].open().readline())['payload']['cwd']==str(workspace)
-        result={'passed':True,'mode':'native_tui','model':model,'label':args.label,'effort':effort,'no_model':args.no_model,'tools':names,'system_prompt_exact':True,'account_instructions':True,'session_id':session,'metadata_binding':True,'synthetic_snapshot_receipt':True,'remote_tool_ack':'unconfirmed','physical_drain':'unconfirmed','original_user_and_project_mcp_excluded':True,'artifacts':str(root)}
+        result={'passed':True,'mode':'native_tui','model':model,'label':args.label,'effort':effort,'no_model':args.no_model,'tools':names,**prompt_report,'account_instructions':True,'session_id':session,'metadata_binding':True,'synthetic_snapshot_receipt':True,'remote_tool_ack':'unconfirmed','physical_drain':'unconfirmed','original_user_and_project_mcp_excluded':True,'artifacts':str(root)}
         (root/'result.json').write_text(json.dumps(result,indent=2)+'\n')
         print(json.dumps(result,indent=2))
     finally:

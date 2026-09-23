@@ -40,6 +40,37 @@ def valid_evidence():
 
 
 class InventoryOracleTest(unittest.TestCase):
+    def test_prompt_report_preserves_exact_item_and_reports_other_developer_text(self):
+        prompt = "Synthetic inventory system instructions."
+        body = {"instructions": {"unrelated": "native field"}, "input": [
+            {"role": "developer", "tools": []},
+            {"role": "developer", "content": [{"type": "input_text", "text": prompt}]},
+            {"role": "developer", "content": [{"type": "input_text", "text": "TUI-DEVELOPER-SENTINEL and native policy"}]},
+        ]}
+        report, texts = inventory.prompt_evidence(body, prompt)
+        self.assertEqual(report, {
+            "configured_prompt_match": "exact_developer_item",
+            "additional_developer_text_observed": True,
+        })
+        self.assertEqual(texts, [prompt, "TUI-DEVELOPER-SENTINEL and native policy"])
+        only_prompt, _ = inventory.prompt_evidence({"input": [body["input"][1]]}, prompt)
+        self.assertFalse(only_prompt["additional_developer_text_observed"])
+
+    def test_prompt_report_keeps_top_level_fallback_and_rejects_partial_match(self):
+        prompt = "Synthetic inventory system instructions."
+        body = {"instructions": prompt + "\n", "input": [
+            {"role": "developer", "content": [{"type": "input_text", "text": "native policy"}]},
+        ]}
+        report, _ = inventory.prompt_evidence(body, prompt)
+        self.assertEqual(report, {
+            "configured_prompt_match": "top_level_instructions_after_trim",
+            "additional_developer_text_observed": True,
+        })
+        body = {"input": [{"role": "developer", "content": [
+            {"type": "input_text", "text": prompt + " with extra text"}]}]}
+        with self.assertRaisesRegex(AssertionError, "System prompt differs"):
+            inventory.prompt_evidence(body, prompt)
+
     def test_valid_fixed_output_evidence(self):
         calls, inputs = valid_evidence()
         inventory.assert_retained_result(calls, inputs)

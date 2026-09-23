@@ -228,8 +228,14 @@ availability or effective policy outside the observed launch.
 
 The TUI producer provisions a fake spooler, a fail-closed fake runner, a
 synthetic system prompt and a non-inherited environment. It checks the native
-request's model (Sol and Luna now use GPT-6), effort, tools, instructions,
-exact rollout identity and native session binding. For the tool result, it
+request's model (Sol and Luna now use GPT-6), effort, tools, configured prompt,
+exact rollout identity and native session binding. In `result.json`,
+`configured_prompt_match` identifies an exact developer-text item or matching
+top-level instructions after trailing whitespace is removed;
+`additional_developer_text_observed` reports other nonempty developer text.
+The prompt check allows native policy text alongside the configured prompt; it
+does not claim that the complete developer instruction set equals that prompt.
+For the tool result, it
 requires the exact supervised `printf inventory-tool-call` dispatch before
 bounded snapshot acquisition, the same bound owner on every fake-spooler call,
 the `ab_test` handle through observation and receipt, later progression, and
@@ -239,10 +245,10 @@ durable storage. Session binding acknowledges identity, not consumption of the
 tool body. Remote acknowledgement and physical drain remain unconfirmed. Use
 a new, short output directory for its Unix socket.
 
-`python3 tests/test_tui_inventory_oracle.py -v` runs five pure in-memory checks
-for the fixed-output oracle, including command, order, handle, and owner-drift
-negative controls. It starts no native host and does not replace the private
-synthetic suite or native inventory run.
+`python3 tests/test_tui_inventory_oracle.py -v` runs eight pure in-memory checks
+for the prompt report and fixed-output oracle, including command, order, handle,
+and owner-drift negative controls. It starts no native host and does not replace
+the private synthetic suite or native inventory run.
 
 The synthetic suite also needs that *externally established* boundary. Inside
 it, set `CODEX_INVENTORY_TEST_BUN` to an absolute private Bun executable and
