@@ -107,7 +107,18 @@ def assert_retained_result(calls, inputs):
         assert not output.get("isError"), output
         output = output["content"]
     if isinstance(output, list):
-        output = "".join(item["text"] for item in output if item.get("type") == "text")
+        # Codex 0.155.1 sends a timing preface and the MCP text as two
+        # input_text blocks. Require that exact shape so an unrelated block
+        # cannot supply the expected fixed output.
+        if len(output) == 2 and all(isinstance(item, dict) and item.get("type") == "input_text"
+                                    and isinstance(item.get("text"), str) for item in output):
+            assert re.fullmatch(r"Wall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:",
+                                output[0]["text"]), output
+            output = output[1]["text"]
+        else:
+            assert (len(output) == 1 and isinstance(output[0], dict) and
+                    output[0].get("type") == "text" and isinstance(output[0].get("text"), str)), output
+            output = output[0]["text"]
     assert isinstance(output, str), output
     header, body = output.split("\n--- output ---\n", 1)
     assert header.splitlines()[0] == "DONE rc=0 handle=ab_test", header

@@ -72,6 +72,26 @@ class InventoryOracleTest(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     inventory.assert_retained_result(calls, inputs)
 
+    def test_native_input_text_wrapper_is_exact(self):
+        calls, inputs = valid_evidence()
+        body = inputs[0]["output"]
+        inputs[0]["output"] = [
+            {"type": "input_text", "text": "Wall time: 0.3372 seconds\nOutput:"},
+            {"type": "input_text", "text": body},
+        ]
+        inventory.assert_retained_result(calls, inputs)
+        for changed in (
+            [{"type": "input_text", "text": body}],
+            [{"type": "input_text", "text": "Error:\nOutput:"}, inputs[0]["output"][1]],
+            [*inputs[0]["output"], {"type": "input_text", "text": body}],
+            [inputs[0]["output"][0], {"type": "input_text", "text": body + "extra"}],
+        ):
+            with self.subTest(changed=changed):
+                with self.assertRaises((AssertionError, ValueError)):
+                    inventory.assert_retained_result(calls, [{"type": "function_call_output",
+                                                             "call_id": "inventory-bash-call",
+                                                             "output": changed}])
+
 
 if __name__ == "__main__":
     unittest.main()
