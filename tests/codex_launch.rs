@@ -974,13 +974,93 @@ signal.signal(signal.SIGTERM,stop)
 print(json.dumps({'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'}),flush=True)
 time.sleep(30)"#,
     );
-    let mut request = output_request(&g);
-    request["host"]["deadline_unix_ms"] = json!(now_ms() + 600);
-    let result = g.invoke("launch", &request);
-    assert_eq!(result.0, 130);
-    assert_complete_output(&result.1);
-    let marker = result
-        .1
+    // The native fixture installs its handler before publishing identity.
+    // Signal only after that marker, so the assertion distinguishes output
+    // drained from the handler from termination during native startup.
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+    struct ReapOnDrop(Child);
+    impl Drop for ReapOnDrop {
+        fn drop(&mut self) {
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+    let mut child = ReapOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"))
+            .arg("launch")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    child
+        .0
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&output_request(&g)).unwrap())
+        .unwrap();
+    let mut stdout = child.0.stdout.take().unwrap();
+    let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    let mut events = Vec::new();
+    let mut pending = Vec::new();
+    let mut deadline = Instant::now() + Duration::from_secs(5);
+    let mut ready = false;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "provider output stalled {} native readiness",
+            if ready { "after" } else { "before" }
+        );
+        let mut chunk = [0_u8; 4096];
+        match stdout.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                pending.extend_from_slice(&chunk[..count]);
+                while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<_> = pending.drain(..=end).collect();
+                    let event: Value = serde_json::from_slice(&line).unwrap();
+                    let session = event["name"] == "oulipoly.provider_session";
+                    events.push(event);
+                    if session && !ready {
+                        ready = true;
+                        assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
+                        deadline = Instant::now() + Duration::from_secs(5);
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("reading provider output: {error}"),
+        }
+    }
+    assert!(ready, "native session never became ready");
+    if !pending.is_empty() {
+        events.push(serde_json::from_slice::<Value>(&pending).unwrap());
+    }
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "provider did not exit after SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(child.0.wait().unwrap().code(), Some(130));
+    assert_eq!(events.last().unwrap()["status"]["kind"], "cancelled");
+    assert_complete_output(&events);
+    let marker = events
         .iter()
         .find(|e| e["name"] == "oulipoly.launch_output_complete/v1")
         .unwrap();
