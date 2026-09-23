@@ -4,6 +4,7 @@
 These call records model the fixed-output fake spooler. No native host, Bun,
 private boundary, or provider process is started by this module.
 """
+import copy
 import hashlib
 import json
 import unittest
@@ -15,6 +16,7 @@ SESSION = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 OTHER_SESSION = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 COMMAND = "printf inventory-tool-call"
 OUTPUT = b"fixture-output\n"
+PROMPT = "Synthetic inventory system instructions."
 
 
 def valid_evidence():
@@ -39,7 +41,27 @@ def valid_evidence():
     return calls, inputs
 
 
+def valid_request_pair():
+    calls, outputs = valid_evidence()
+    first = {"model": "gpt-6-luna", "reasoning": {"effort": "low"}, "input": [
+        {"type": "additional_tools", "tools": [
+            {"type": "namespace", "name": "mcp__agent_bash", "tools": [
+                {"type": "function", "name": "bash"}]},
+        ]},
+        {"role": "developer", "content": [{"type": "input_text", "text": PROMPT}]},
+        {"role": "developer", "content": [{"type": "input_text", "text": "TUI-DEVELOPER-SENTINEL"}]},
+    ]}
+    second = copy.deepcopy(first)
+    second["input"].extend([
+        {"type": "function_call", "call_id": "inventory-bash-call"}, *outputs,
+    ])
+    return calls, [first, second]
+
+
 class InventoryOracleTest(unittest.TestCase):
+    def assert_valid_pair(self, calls, requests):
+        return inventory.assert_inventory_request_pair(requests, calls, "gpt-6-luna", "low", PROMPT)
+
     def test_prompt_report_preserves_exact_item_and_reports_other_developer_text(self):
         prompt = "Synthetic inventory system instructions."
         body = {"instructions": {"unrelated": "native field"}, "input": [
@@ -74,6 +96,43 @@ class InventoryOracleTest(unittest.TestCase):
     def test_valid_fixed_output_evidence(self):
         calls, inputs = valid_evidence()
         inventory.assert_retained_result(calls, inputs)
+
+    def test_valid_request_pair(self):
+        calls, requests = valid_request_pair()
+        requests[1]["prompt_cache_key"] = "incidental second-request field"
+        names, report = self.assert_valid_pair(calls, requests)
+        self.assertEqual(names, ["mcp__agent_bash.bash"])
+        self.assertEqual(report["configured_prompt_match"], "exact_developer_item")
+
+    def test_extra_tool_result_is_rejected(self):
+        for index, call_id in ((0, "earlier-call"), (1, "unrelated-call"),
+                               (1, "inventory-bash-call")):
+            with self.subTest(request=index, call_id=call_id):
+                calls, requests = valid_request_pair()
+                requests[index]["input"].append({"type": "function_call_output",
+                                                 "call_id": call_id, "output": "unrelated"})
+                with self.assertRaises(AssertionError):
+                    self.assert_valid_pair(calls, requests)
+
+    def test_second_request_policy_drift_is_rejected(self):
+        for change in ("model", "effort", "extra_tool", "missing_bash", "prompt", "account"):
+            with self.subTest(change=change):
+                calls, requests = valid_request_pair()
+                second = requests[1]
+                if change == "model":
+                    second["model"] = "gpt-6-sol"
+                elif change == "effort":
+                    second["reasoning"]["effort"] = "high"
+                elif change == "extra_tool":
+                    second["input"][0]["tools"].append({"type": "function", "name": "exec_command"})
+                elif change == "missing_bash":
+                    second["input"][0]["tools"].clear()
+                elif change == "prompt":
+                    second["input"][1]["content"][0]["text"] = "different instructions"
+                else:
+                    second["input"][2]["content"][0]["text"] = "different account text"
+                with self.assertRaises(AssertionError):
+                    self.assert_valid_pair(calls, requests)
 
     def test_snapshot_before_run_is_rejected(self):
         calls, inputs = valid_evidence()

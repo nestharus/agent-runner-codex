@@ -95,10 +95,9 @@ def assert_retained_result(calls, inputs):
     progression = [n for n, call in enumerate(calls)
                    if call["args"][0] == "status" and "--observe-only" not in call["args"]]
     assert progression and all(n > accepted for n in progression), calls
-    outputs = [item["output"] for item in inputs if item.get("type") == "function_call_output"
-               and item.get("call_id") == "inventory-bash-call"]
-    assert len(outputs) == 1, inputs
-    output = outputs[0]
+    outputs = [item for item in inputs if item.get("type") == "function_call_output"]
+    assert len(outputs) == 1 and outputs[0].get("call_id") == "inventory-bash-call", inputs
+    output = outputs[0]["output"]
     # Native hosts may encode the MCP content as JSON, or flatten its text.
     if isinstance(output, str):
         try: output = json.loads(output)
@@ -217,6 +216,40 @@ def prompt_evidence(body, instructions):
     }, texts
 
 
+def assert_request_constraints(body, model, effort, instructions):
+    """Check the configured route and launch policy on each request in the turn."""
+    assert body['model'] == model, body['model']
+    assert body['reasoning']['effort'] == effort, body['reasoning']
+    tools = list(body.get('tools', []))
+    for item in body.get('input', []):
+        if item.get('type') == 'additional_tools':
+            tools.extend(item.get('tools', []))
+    names = []
+    for tool in tools:
+        if tool.get('type') == 'namespace':
+            names.extend(tool['name'] + '.' + child['name'] for child in tool.get('tools', []))
+        else:
+            names.append(tool.get('name', tool.get('type')))
+    allowed = {'mcp__agent_bash.bash', 'functions.request_user_input',
+               'functions.list_mcp_resources', 'functions.list_mcp_resource_templates',
+               'functions.read_mcp_resource'}
+    assert 'mcp__agent_bash.bash' in names and set(names) <= allowed, names
+    prompt_report, texts = prompt_evidence(body, instructions)
+    assert any('TUI-DEVELOPER-SENTINEL' in text for text in texts), 'Account instructions missing'
+    return names, prompt_report
+
+
+def assert_inventory_request_pair(requests, calls, model, effort, instructions):
+    """Check the one-call turn and its sole retained result in the next request."""
+    assert len(requests) == 2, requests
+    assert not any(item.get('type') == 'function_call_output'
+                   for item in requests[0]['input']), requests[0]['input']
+    first = assert_request_constraints(requests[0], model, effort, instructions)
+    assert_request_constraints(requests[1], model, effort, instructions)
+    assert_retained_result(calls, requests[1]['input'])
+    return first
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--boundary-report', type=Path, required=True, help='Externally established private namespace probe; not created by this script')
@@ -317,31 +350,17 @@ def main():
         with capture_lock:
             persist_requests(captured)
         assert len(captured)==2, f'Expected native Bash call + response, received {len(captured)} requests; artifacts: {root}'
-        body=captured[0]
         model=('gpt-6-luna' if args.label.startswith('gpt-luna-')
                else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
                else 'gpt-6-astra' if args.label.startswith('gpt-astra-')
                else 'gpt-6-sol' if args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
-        assert body['model']==model
-        assert body['reasoning']['effort']==effort, body['reasoning']
-        tools=list(body.get('tools',[]))
-        for item in body.get('input',[]):
-            if item.get('type')=='additional_tools':tools.extend(item.get('tools',[]))
-        names=[]
-        for tool in tools:
-            if tool.get('type')=='namespace':names.extend(tool['name']+'.'+child['name'] for child in tool.get('tools',[]))
-            else:names.append(tool.get('name',tool.get('type')))
-        allowed={'mcp__agent_bash.bash','functions.request_user_input','functions.list_mcp_resources','functions.list_mcp_resource_templates','functions.read_mcp_resource'}
-        assert 'mcp__agent_bash.bash' in names and set(names)<=allowed,names
         instructions=Path(runtime['system_prompt_file']).read_text().rstrip()
-        prompt_report, texts=prompt_evidence(body,instructions)
-        assert any('TUI-DEVELOPER-SENTINEL' in t for t in texts),'Account instructions missing'
         calls=[json.loads(line) for line in (root/'bash-calls.jsonl').read_text().splitlines()]
         session=reports[0]['provider_session_id']
         assert reports and all(report == {'schema_version':1,'token':'local-inventory-token','invocation_uuid':INVOCATION_UUID,'provider_session_id':session} for report in reports),reports
         assert session!=environment['CODEX_THREAD_ID']
         assert calls[0]['owner']==session,calls
-        assert_retained_result(calls, captured[1]['input'])
+        names, prompt_report=assert_inventory_request_pair(captured,calls,model,effort,instructions)
         # Identity originates in native metadata; verify it against the exact
         # rollout ID after binding rather than discovering a latest-session ID.
         matches=[]
