@@ -41,5 +41,7 @@ the task worktree and branch when complete.
 
 ## Documentation
 
-Keep `README.md` current with the pinned Codex version/surfaces, implemented
+Keep `README.md` current with the Codex surfaces and tested versions, implemented
 capabilities, auth/config isolation, build/install steps, and benchmark modes.
+Do not gate native launch on a Codex CLI version banner or numeric version range;
+verify launch behavior and tool policy through explicit tests and native errors.

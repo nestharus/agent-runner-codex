@@ -47,10 +47,13 @@ explicit additions. Credentials stay in their existing native account homes.
 
 ## Native execution and tools
 
-The adapter is pinned to **Codex CLI 0.155.1**, using stable
-`codex exec --json`, `codex exec resume`, and the interactive Codex CLI inside
-Agent Runner's PTY. An unverified CLI version is rejected
-before model execution. It does not depend on app-server dynamic tools.
+The adapter uses stable `codex exec --json`, `codex exec resume`, and the
+interactive Codex CLI inside Agent Runner's PTY. It does not probe or gate the
+native CLI version before launch, and does not depend on app-server dynamic
+tools. Deterministic fake-native tests verify that changed and future version
+banners do not block either launch route. The former version gate required Codex
+CLI 0.155.1; removing it does not establish compatibility with a later installed
+CLI. Native executable, protocol, and policy failures still surface at launch.
 
 A pinned model catalog removes metadata-forced native tools in addition to the
 feature flags. Native inventory tests support every Astra, Luna, Terra, and Sol
@@ -143,8 +146,8 @@ existing isolated-profile policy; this does not import or trust arbitrary user h
 Before TUI exec, the provider validates its staged release payload, generated
 hook declarations/trust, emitted configuration inputs and authenticated launch
 authority. **Integration validation is not effective-native-policy admission.**
-There is no disposable app-server or other native configuration/startup probe:
-only the existing pinned `--version` check precedes the one normal native startup.
+There is no disposable app-server, version, or other native preflight probe:
+preparation is followed by one normal native startup.
 Native Codex remains authoritative for system/managed/cloud policy, folder trust
 and hook trust. Policy may disable/exclude the staged hooks or redirect instruction,
 catalog, authentication or storage settings. The provider neither emulates this

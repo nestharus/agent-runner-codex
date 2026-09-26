@@ -1,6 +1,8 @@
 # Contract and PTY verification — 2026-09-05
 
-The installed provider and runner were verified against Codex CLI **0.153.4**.
+This is a historical record from 2026-09-05, before the CLI version gate was
+removed. The installed provider and runner were verified against Codex CLI
+**0.153.4** at that time.
 
 - Final provider `cargo test`: **70 passed**, including managed interactive
   launch, native terminal errors/signals, cross-account SQLite ownership, and
@@ -36,7 +38,8 @@ These checks establish the implemented contract, not every optional operation.
 Prompt-acceptance attestation, standalone auth refresh, session export/replace,
 cross-account rotation, arbitrary settings CRUD, and shared app-server runtime
 remain unsupported. Ambiguous PTY submission recovery remains conservative in
-the runner. Managed PTY support currently requires Unix and the pinned CLI.
+the runner. At the time of this verification, managed PTY support required Unix
+and the then-pinned CLI; the version gate was removed on 2026-09-25.
 
 ## Earlier migration baseline — 2026-09-04
 

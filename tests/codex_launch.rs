@@ -33,9 +33,9 @@ impl Fixture {
             &codex,
             r#"#!/usr/bin/env python3
 import os,sys,json
-if sys.argv[1:] == ['--version']:
- print('codex-cli 0.155.1');sys.exit(0)
 with open(os.environ['CALLS'],'a') as f: f.write(json.dumps({'argv':sys.argv[1:],'home':os.environ.get('CODEX_HOME'),'kept':os.environ.get('CUSTOM_SENTINEL'),'stdin':sys.stdin.read()})+'\n')
+if sys.argv[1:] == ['--version']:
+ print('codex-cli 99.999.0');sys.exit(89)
 for event in [{'type':'thread.started','thread_id':'11111111-2222-3333-4444-555555555555'},{'type':'turn.started'},{'type':'item.completed','item':{'type':'agent_message','text':'native-ok'}},{'type':'turn.completed','usage':{}}]: print(json.dumps(event),flush=True)
 "#,
         );
@@ -385,6 +385,15 @@ fn missing_instruction_file_is_rejected_before_spawn() {
     assert_eq!(events[0]["error"]["code"], "runtime_dependency_missing");
 }
 #[test]
+fn missing_native_executable_reports_runtime_dependency() {
+    let f = Fixture::new();
+    fs::remove_file(f.root.path().join("codex")).unwrap();
+    let (code, events) = f.invoke("launch", &f.request);
+    assert_ne!(code, 0);
+    assert_eq!(events[0]["error"]["code"], "runtime_dependency_missing");
+    assert!(!f.root.path().join("calls.jsonl").exists());
+}
+#[test]
 fn native_success_without_turn_completed_does_not_report_assistant_completion() {
     let f = Fixture::new();
     let path = f.root.path().join("codex");
@@ -400,21 +409,31 @@ fn native_success_without_turn_completed_does_not_report_assistant_completion() 
 }
 
 fn fake_native(f: &Fixture, body: &str) {
-    executable(&f.root.path().join("codex"), &format!("#!/usr/bin/env python3\nimport os,sys,json,time\nif sys.argv[1:] == ['--version']:\n print('codex-cli 0.155.1');sys.exit(0)\n{body}\n"));
+    executable(
+        &f.root.path().join("codex"),
+        &format!("#!/usr/bin/env python3\nimport os,sys,json,time\n{body}\n"),
+    );
 }
 
 #[test]
-fn previous_native_version_is_rejected_before_launch() {
-    let f = Fixture::new();
-    let path = f.root.path().join("codex");
-    let text = fs::read_to_string(&path)
-        .unwrap()
-        .replace("codex-cli 0.155.1", "codex-cli 0.153.4");
-    file(&path, &text);
-    let (code, events) = f.invoke("launch", &f.request);
-    assert_ne!(code, 0);
-    assert_eq!(events[0]["error"]["code"], "codex_version_unverified");
-    assert!(!f.root.path().join("calls.jsonl").exists());
+fn changed_or_future_native_banner_does_not_probe_or_block_launch() {
+    for banner in ["codex-cli 0.153.4", "codex-cli 99.999.0"] {
+        let f = Fixture::new();
+        let path = f.root.path().join("codex");
+        let text = fs::read_to_string(&path)
+            .unwrap()
+            .replace("codex-cli 99.999.0", banner);
+        file(&path, &text);
+        let (code, events) = f.invoke("launch", &f.request);
+        assert_eq!(code, 0, "{banner}: {events:?}");
+        let calls: Vec<Value> = fs::read_to_string(f.root.path().join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(calls.len(), 1, "{banner}");
+        assert_ne!(calls[0]["argv"], json!(["--version"]));
+    }
 }
 
 fn now_ms() -> u64 {
@@ -459,14 +478,10 @@ fn corrupted_completed_journal_is_rejected_without_rerunning_native_work() {
 }
 
 #[test]
-fn version_probe_honors_deadline_without_launching_a_turn() {
+fn expired_deadline_prevents_native_spawn() {
     let f = Fixture::new();
-    executable(
-        &f.root.path().join("codex"),
-        "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n",
-    );
     let mut request = f.request.clone();
-    request["host"]["deadline_unix_ms"] = json!(now_ms() + 300);
+    request["host"]["deadline_unix_ms"] = json!(now_ms() - 1);
     let started = std::time::Instant::now();
     let result = f.invoke("launch", &request);
     assert!(started.elapsed() < std::time::Duration::from_secs(3));

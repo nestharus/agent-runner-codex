@@ -1,5 +1,5 @@
 //! Managed Codex TUI launcher. The runner keeps PTY/process ownership; this
-//! executable validates the account and replaces itself with the pinned CLI.
+//! executable validates the account and replaces itself with the configured CLI.
 use crate::{
     account,
     envelope::{ProviderFailure, RequestEnvelope},
@@ -84,8 +84,8 @@ fn isolated_home(account_home: &std::path::Path) -> Result<PathBuf, ProviderFail
             .prefix("launch-")
             .tempdir_in(&root)
             .map_err(|_| invalid("Cannot create isolated Codex configuration home"))?;
-        // Keep native auth and storage in their owning account. In pinned Codex
-        // 0.153.4 file authentication refresh truncates through the auth symlink.
+        // Keep native auth and storage in their owning account. In the 0.153.4
+        // native source, file authentication refresh truncates through this symlink.
         // Sharing writer locks is mandatory when transcripts are shared.
         for name in ["sessions", "archived_sessions", "thread-writer-locks"] {
             std::fs::create_dir_all(account_home.join(name))
@@ -116,7 +116,7 @@ fn isolated_home(account_home: &std::path::Path) -> Result<PathBuf, ProviderFail
     }
 }
 
-fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
+fn prepare(args: &[String]) -> Result<(Command, RequestEnvelope), ProviderFailure> {
     let options = parse(args).map_err(invalid)?;
     let settings_id = options.settings_id.as_deref().unwrap();
     let label = match (&options.model, &options.native_model, &options.native_effort) {
@@ -186,6 +186,14 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
     }
     let plan = policy::plan(&request, true)?;
     let mut config = RuntimeConfig::load(&request.host)?;
+    if !config.codex_bin.is_absolute() || !config.codex_bin.is_file() {
+        return Err(ProviderFailure::invalid_settings(
+            "",
+            "runtime_dependency_missing",
+            "codex_bin must name an existing absolute file",
+            json!({}),
+        ));
+    }
     let account_home = account::home(&request.host, settings_id)?;
     if let Some(session) = options.resume.as_deref() {
         if !launch::valid_thread_id(session) {
@@ -255,7 +263,6 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
     let home = isolated_home(&account_home)?;
     crate::registration::stage(&mut config, &config_root, &home)?;
     config.validate()?;
-    launch::verify_version(&config, &env, &request)?;
     crate::registration::declaration(&home, &config)?;
     env.insert(
         "AGENT_RUNNER_CODEX_REGISTRATION_CWD".into(),
@@ -307,7 +314,7 @@ fn prepare(args: &[String]) -> Result<Command, ProviderFailure> {
         command.env_remove(key);
     }
     command.args(native_args).envs(env).current_dir(cwd);
-    Ok(command)
+    Ok((command, request))
 }
 
 pub fn run(args: &[String]) -> i32 {
@@ -315,8 +322,8 @@ pub fn run(args: &[String]) -> i32 {
         println!("agent-runner-codex interactive --settings-id ACCOUNT [--config-root PATH] [--model LABEL] [--resume UUID] [--prompt TEXT]\n\nManaged Codex TUI with Agent Bash. The default model is gpt-xhigh.\nIntegration validation covers staged payloads and emitted settings, not permission under native effective policy. Native Codex enforces system/managed/cloud policy at startup; hooks may be excluded or settings redirected. Missing exact registration remains an error. Check native policy with its administrator rather than changing trust to bypass it.\nExact legacy -m MODEL -c 'model_reasoning_effort=\"EFFORT\"' selection is also supported.");
         return 0;
     }
-    let mut command = match prepare(args) {
-        Ok(command) => command,
+    let (mut command, request) = match prepare(args) {
+        Ok(prepared) => prepared,
         Err(error) => {
             eprintln!(
                 "Managed Codex interactive launch rejected: {}",
@@ -325,6 +332,13 @@ pub fn run(args: &[String]) -> i32 {
             return error.exit_code;
         }
     };
+    if let Err(error) = launch::validate_admission(&request) {
+        eprintln!(
+            "Managed Codex interactive launch rejected: {}",
+            error.message
+        );
+        return error.exit_code;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

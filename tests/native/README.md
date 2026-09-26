@@ -39,8 +39,9 @@ and structured stop on both initial and subsequent submitted-turn hooks. This
 is not full TUI behavior, deployed executable attestation, a universal stop on
 hook crash/timeout, or proof of every managed/cloud policy path. Interactive
 preparation does not invoke this harness or a native config/runtime probe. Separate
-fake-executable tests record every invocation and require only `--version` plus
-one normal TUI exec; they do not infer effective policy from emitted settings.
+fake-executable tests record every invocation and require exactly one normal
+TUI exec, with no version or other preflight probe; they do not infer effective
+policy from emitted settings.
 
 The read-only filesystem fixture is adapted from upstream Apache-2.0 tests;
 see `UPSTREAM-LICENSE`. Native product crates remain external unmodified inputs.

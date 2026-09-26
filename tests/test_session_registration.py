@@ -23,7 +23,7 @@ NATIVE = r'''#!/usr/bin/python3
 import json,os,sys
 with open(os.environ['CALLS']+'.all','a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['--version']:
- print('codex-cli 0.155.1');sys.exit(0)
+ print('codex-cli 99.999.0');sys.exit(89)
 if sys.argv[1:2] in [['app-server'], ['features'], ['doctor'], ['debug']]:
  sys.exit(93) # No extra config/runtime startup is part of interactive preparation.
 with open(os.environ['CALLS'],'w') as f: json.dump({'argv':sys.argv[1:],'env':dict(os.environ)},f)
@@ -121,10 +121,10 @@ class RegistrationTests(unittest.TestCase):
         self.assertFalse((self.f.root/'calls.json.all').exists());self.assertEqual(p.read_text(),'do not replace')
     def test_nonexecutable_dependency_fails_before_native(self):
         self.f.dep.chmod(0o600);self.assertNotEqual(self.f.launch().returncode,0);self.assertFalse((self.f.root/'calls.json').exists())
-    def test_one_normal_startup_and_version_only_no_native_config_probe(self):
+    def test_one_normal_startup_without_native_preflight_or_version_probe(self):
         self.launch()
         calls=[json.loads(line) for line in (self.f.root/'calls.json.all').read_text().splitlines()]
-        self.assertEqual(calls, [['--version'], json.loads(self.f.live['FIXTURE_NATIVE_ARGS'])])
+        self.assertEqual(calls, [json.loads(self.f.live['FIXTURE_NATIVE_ARGS'])])
         self.assertNotIn('CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED',self.f.live)
     def test_missing_runner_authority_fails_before_native(self):
         del self.f.env['OULIPOLY_LIVE_SESSION_BIND_TOKEN']

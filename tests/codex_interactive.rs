@@ -26,7 +26,7 @@ impl Fixture {
 import os,sys,json
 with open(os.environ['CALLS']+'.all','a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['--version']:
- print('codex-cli 0.155.1');sys.exit(0)
+ print('codex-cli 99.999.0');sys.exit(89)
 if sys.argv[1:2] in [['app-server'], ['features'], ['doctor'], ['debug']]:
  sys.exit(93) # No extra config/runtime startup is part of interactive preparation.
 with open(os.environ['CALLS'],'w') as f:
@@ -198,7 +198,7 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(calls, vec![json!(["--version"]), call["argv"].clone()]);
+    assert_eq!(calls, vec![call["argv"].clone()]);
     assert_eq!(call["pid"], pid);
     let home = Path::new(call["home"].as_str().unwrap());
     assert!(home.starts_with(f.root.path().join(".codex3/agent-runner-managed/tui")));
@@ -243,24 +243,23 @@ fn managed_tui_preserves_pty_process_identity_and_account_policy() {
 }
 
 #[test]
-fn previous_native_version_is_rejected_before_tui_spawn() {
-    let f = Fixture::new();
-    let path = f.root.path().join("native");
-    let text = fs::read_to_string(&path)
-        .unwrap()
-        .replace("codex-cli 0.155.1", "codex-cli 0.153.4");
-    fs::write(&path, text).unwrap();
-    let result = f.command().output().unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("codex-cli 0.155.1"));
-    assert!(!f.root.path().join("calls.json").exists());
-    assert_eq!(
-        fs::read_to_string(f.root.path().join("calls.json.all"))
+fn changed_or_future_native_banner_does_not_probe_or_block_tui_spawn() {
+    for banner in ["codex-cli 0.153.4", "codex-cli 99.999.0"] {
+        let f = Fixture::new();
+        let path = f.root.path().join("native");
+        let text = fs::read_to_string(&path)
+            .unwrap()
+            .replace("codex-cli 99.999.0", banner);
+        fs::write(&path, text).unwrap();
+        let result = f.command().output().unwrap();
+        assert!(result.status.success(), "{banner}: {:?}", result.stderr);
+        let calls: Vec<Value> = fs::read_to_string(f.root.path().join("calls.json.all"))
             .unwrap()
             .lines()
-            .count(),
-        1
-    );
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(calls, vec![f.call()["argv"].clone()], "{banner}");
+    }
 }
 
 #[test]
@@ -389,6 +388,29 @@ fn tui_clears_parent_instructions_unless_selected_account_declares_override() {
             json!(selected.filter(|value| !value.trim().is_empty()))
         );
     }
+}
+
+#[test]
+fn tui_reports_missing_executable_and_native_exit_status() {
+    let missing = Fixture::new();
+    fs::remove_file(missing.root.path().join("native")).unwrap();
+    let result = missing.command().output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("codex_bin"));
+    assert!(!missing.root.path().join("calls.json.all").exists());
+
+    let failed = Fixture::new();
+    let path = failed.root.path().join("native");
+    let script = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{script}\nsys.exit(17)\n")).unwrap();
+    let result = failed.command().output().unwrap();
+    assert_eq!(result.status.code(), Some(17));
+    let calls: Vec<Value> = fs::read_to_string(failed.root.path().join("calls.json.all"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(calls, vec![failed.call()["argv"].clone()]);
 }
 
 #[test]

@@ -152,10 +152,7 @@ fn replay_journal<W: Write>(
     std::io::copy(&mut file, writer).map_err(io_failure)?;
     writer.flush().map_err(io_failure)
 }
-const PINNED_VERSION: &str = "codex-cli 0.155.1";
-const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_CLOSE_GRACE: Duration = Duration::from_secs(2);
-const MAX_VERSION_BYTES: u64 = 64 * 1024;
 static CANCEL_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(unix)]
@@ -188,7 +185,7 @@ fn deadline_elapsed(request: &RequestEnvelope) -> bool {
         .is_some_and(|deadline| now_unix_ms() >= deadline)
 }
 
-fn validate_admission(request: &RequestEnvelope) -> Result<(), ProviderFailure> {
+pub(crate) fn validate_admission(request: &RequestEnvelope) -> Result<(), ProviderFailure> {
     if cancel_requested() {
         return Err(failure(
             "launch_cancelled",
@@ -220,59 +217,6 @@ fn publish_session(path: &Path, id: &str) -> Result<(), ProviderFailure> {
     writeln!(file, "{id}").map_err(io_failure)?;
     file.as_file().sync_all().map_err(io_failure)?;
     file.persist(path).map_err(|e| io_failure(e.error))?;
-    Ok(())
-}
-
-pub(crate) fn verify_version(
-    config: &RuntimeConfig,
-    env: &BTreeMap<String, String>,
-    request: &RequestEnvelope,
-) -> Result<(), ProviderFailure> {
-    validate_admission(request)?;
-    let mut output = tempfile::tempfile().map_err(io_failure)?;
-    let mut command = std::process::Command::new(&config.codex_bin);
-    command
-        .arg("--version")
-        .envs(env)
-        .stdin(Stdio::null())
-        .stdout(output.try_clone().map_err(io_failure)?)
-        .stderr(Stdio::null());
-    native_process::configure_process_group(&mut command);
-    let mut child = ChildGuard(command.spawn().map_err(io_failure)?, true);
-    let started = Instant::now();
-    let status = loop {
-        validate_admission(request)?;
-        if output.metadata().map_err(io_failure)?.len() > MAX_VERSION_BYTES {
-            return Err(failure(
-                "codex_version_output_limit",
-                "Codex version output exceeded 64 KiB",
-            ));
-        }
-        if let Some(status) = child.0.try_wait().map_err(io_failure)? {
-            break status;
-        }
-        if started.elapsed() >= VERSION_TIMEOUT {
-            return Err(failure(
-                "codex_version_timeout",
-                "Codex version probe timed out",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    native_process::terminate_process_group_child(&mut child.0);
-    child.1 = false;
-    output.seek(SeekFrom::Start(0)).map_err(io_failure)?;
-    let mut bytes = Vec::new();
-    output
-        .take(MAX_VERSION_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_failure)?;
-    if bytes.len() as u64 > MAX_VERSION_BYTES
-        || !status.success()
-        || String::from_utf8_lossy(&bytes).trim() != PINNED_VERSION
-    {
-        return Err(failure("codex_version_unverified", format!("This adapter's tool inventory is verified against {PINNED_VERSION}; validate an upgrade before launch")));
-    }
     Ok(())
 }
 
@@ -659,7 +603,6 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     if let Some(id) = session {
         env.insert("AGENT_RUNNER_CODEX_SESSION_ID".into(), id.into());
     }
-    verify_version(&config, &env, request)?;
     // This file is private and fresh for this request. MCP waits for native identity.
     let mut session_file_options = OpenOptions::new();
     session_file_options.create_new(true).write(true);
@@ -706,7 +649,16 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         journal_sha256: None,
         journal_len: None,
     };
+    if let Err(error) = validate_admission(request) {
+        std::fs::remove_file(&session_path).map_err(io_failure)?;
+        return Err(error);
+    }
     write_state(&state_path, &state)?;
+    if let Err(error) = validate_admission(request) {
+        std::fs::remove_file(&state_path).map_err(io_failure)?;
+        std::fs::remove_file(&session_path).map_err(io_failure)?;
+        return Err(error);
+    }
     let (child, release) = gate.spawn().map_err(io_failure)?;
     let mut child = ChildGuard(child, true);
     let actor = native_process::actor_for_child(&child.0).map_err(io_failure)?;
@@ -767,6 +719,15 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         });
     }
     drop(send);
+    if let Err(error) = validate_admission(request) {
+        drop(release);
+        native_process::terminate_process_group_child(&mut child.0);
+        child.1 = false;
+        std::fs::remove_file(&journal_path).map_err(io_failure)?;
+        std::fs::remove_file(&state_path).map_err(io_failure)?;
+        std::fs::remove_file(&session_path).map_err(io_failure)?;
+        return Err(error);
+    }
     release.release().map_err(io_failure)?;
     let mut stdin = child.0.stdin.take().unwrap();
     let prompt = plan.prompt.clone();
