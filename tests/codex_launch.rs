@@ -98,11 +98,12 @@ fn model_request(f: &Fixture, label: &str, model: &str, effort: &str) -> Value {
 #[test]
 fn standard_sol_and_named_astra_argv_are_independently_checked() {
     for (label, model, effort) in [
-        ("gpt-low", "gpt-6-sol", "low"),
-        ("gpt-medium", "gpt-6-sol", "medium"),
-        ("gpt-high", "gpt-6-sol", "high"),
-        ("gpt-xhigh", "gpt-6-sol", "xhigh"),
-        ("gpt-max", "gpt-6-sol", "max"),
+        ("gpt", "gpt-6.1-sol", "high"),
+        ("gpt-low", "gpt-6.1-sol", "low"),
+        ("gpt-medium", "gpt-6.1-sol", "medium"),
+        ("gpt-high", "gpt-6.1-sol", "high"),
+        ("gpt-xhigh", "gpt-6.1-sol", "xhigh"),
+        ("gpt-max", "gpt-6.1-sol", "max"),
         ("gpt-astra-low", "gpt-6-astra", "low"),
         ("gpt-astra-medium", "gpt-6-astra", "medium"),
         ("gpt-astra-high", "gpt-6-astra", "high"),
@@ -110,6 +111,24 @@ fn standard_sol_and_named_astra_argv_are_independently_checked() {
         ("gpt-astra-max", "gpt-6-astra", "max"),
     ] {
         assert_model_launch(label, model, effort);
+    }
+}
+
+#[test]
+fn gpt_alias_rejects_old_sol_or_non_high_effort_before_spawn() {
+    for (model, effort) in [("gpt-6-sol", "high"), ("gpt-6.1-sol", "xhigh")] {
+        let f = Fixture::new();
+        let request = model_request(&f, "gpt", model, effort);
+        let (_, response) = f.invoke("policy.evaluate", &request);
+        assert_eq!(response[0]["result"]["accepted"], false);
+        assert_eq!(
+            response[0]["result"]["diagnostics"][0]["code"],
+            "model_args_mismatch"
+        );
+        let (code, response) = f.invoke("launch", &request);
+        assert_ne!(code, 0);
+        assert_eq!(response[0]["error"]["code"], "model_args_mismatch");
+        assert!(!f.root.path().join("calls.jsonl").exists());
     }
 }
 
@@ -178,7 +197,7 @@ fn assert_stale_astra_rejected(effort: &str) {
     // Matching Sol provider_args must not launder stale Astra argv.
     request["params"]["model"]["provider_args"] = json!([
         "-m",
-        "gpt-6-sol",
+        "gpt-6.1-sol",
         "-c",
         format!("model_reasoning_effort=\"{effort}\"")
     ]);
@@ -200,7 +219,7 @@ fn named_model_families_pass_policy_and_launch_with_managed_tools_in_every_accou
         ("astra", "gpt-6-astra"),
         ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-6-sol"),
+        ("sol", "gpt-6.1-sol"),
     ] {
         for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
@@ -334,10 +353,10 @@ fn named_model_families_reject_ultra_and_cross_model_or_effort_arguments() {
         ("astra", "gpt-6-astra"),
         ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-6-sol"),
+        ("sol", "gpt-6.1-sol"),
     ] {
         let cross_model = if model == "gpt-6-astra" {
-            "gpt-6-sol"
+            "gpt-6.1-sol"
         } else {
             "gpt-6-astra"
         };
@@ -800,7 +819,7 @@ fn sigterm_cancels_cli_and_reaps_native_process_group() {
 
 #[test]
 fn model_catalog_cannot_reenable_native_tools() {
-    for slug in ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol"] {
+    for slug in ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra", "gpt-6.1-sol"] {
         let f = Fixture::new();
         let path = f.root.path().join("models.json");
         let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -823,7 +842,7 @@ fn model_catalog_cannot_reenable_native_tools() {
 
 #[test]
 fn missing_or_duplicate_model_metadata_rejects_launch_before_spawn() {
-    for slug in ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol"] {
+    for slug in ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra", "gpt-6.1-sol"] {
         for duplicate in [false, true] {
             let f = Fixture::new();
             let path = f.root.path().join("models.json");

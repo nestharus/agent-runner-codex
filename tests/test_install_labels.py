@@ -56,6 +56,7 @@ class LabelInstallerTests(unittest.TestCase):
         ], capture_output=True, text=True, timeout=20)
 
     def standard_fixture(self):
+        (self.models / 'gpt.toml').write_text('# previous gpt route\n')
         for effort in EFFORTS:
             route = ('# Preserve standard route formatting and comments.\n'
                      f'provider = {{ path = "{PROVIDER}" }}\n'
@@ -70,9 +71,9 @@ class LabelInstallerTests(unittest.TestCase):
         return {p.name: p.read_bytes() for p in self.models.iterdir()}
 
     def assert_standard_routes(self, directory):
-        for label in EFFORTS:
-            route = tomllib.loads((directory / f'gpt-{label}.toml').read_text())
-            expected = ['-m', 'gpt-6-sol', '-c', f'model_reasoning_effort="{label}"']
+        for label, effort in [('gpt', 'high'), *((f'gpt-{e}', e) for e in EFFORTS)]:
+            route = tomllib.loads((directory / f'{label}.toml').read_text())
+            expected = ['-m', 'gpt-6.1-sol', '-c', f'model_reasoning_effort="{effort}"']
             self.assertEqual([p['name'] for p in route['providers']], ACCOUNTS)
             for account in route['providers']:
                 self.assertEqual(account['args'], expected, label)
@@ -111,7 +112,7 @@ class LabelInstallerTests(unittest.TestCase):
         result = self.install('--apply', family='standard')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_standard_routes(self.models)
-        affected = {f'gpt-{effort}.toml' for effort in EFFORTS}
+        affected = {'gpt.toml', *(f'gpt-{effort}.toml' for effort in EFFORTS)}
         for name, content in before.items():
             if name not in affected:
                 self.assertEqual((self.models / name).read_bytes(), content, name)
@@ -128,32 +129,33 @@ class LabelInstallerTests(unittest.TestCase):
 
     def test_standard_stale_discovery_rejects_apply_without_mutation(self):
         before = self.standard_fixture()
-        old = self.root / 'stale-provider'
-        old.write_text('#!/usr/bin/env python3\nimport json,subprocess,sys\n'
-                       f'r=subprocess.run([{str(PROVIDER)!r}, *sys.argv[1:]], input=sys.stdin.read(), capture_output=True, text=True)\n'
-                       'v=json.loads(r.stdout)\n'
-                       'for e in v["result"]["models"]:\n'
-                       ' if e["name"] in ["gpt-low","gpt-medium","gpt-high","gpt-xhigh","gpt-max"]:\n'
-                       '  e["provider_model"]="gpt-6-astra"; e["provider_args"][1]="gpt-6-astra"\n'
-                       'print(json.dumps(v))\n')
-        old.chmod(0o755)
-        result = self.install('--apply', family='standard', provider=old)
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("model, arguments, or eligible accounts do not match", result.stderr)
-        self.assertEqual({p.name: p.read_bytes() for p in self.models.iterdir()}, before)
-        self.assertEqual((self.config / 'providers.toml').read_text(), self.original_providers)
-        self.assertFalse((self.config / 'backups').exists())
+        for stale_model in ['gpt-6-astra', 'gpt-6-sol']:
+            with self.subTest(stale_model=stale_model):
+                old = self.root / 'stale-provider'
+                old.write_text('#!/usr/bin/env python3\nimport json,subprocess,sys\n'
+                               f'r=subprocess.run([{str(PROVIDER)!r}, *sys.argv[1:]], input=sys.stdin.read(), capture_output=True, text=True)\n'
+                               'v=json.loads(r.stdout)\n'
+                               'for e in v["result"]["models"]:\n'
+                               ' if e["name"] in ["gpt","gpt-low","gpt-medium","gpt-high","gpt-xhigh","gpt-max"]:\n'
+                               f'  e["provider_model"]={stale_model!r}; e["provider_args"][1]={stale_model!r}\n'
+                               'print(json.dumps(v))\n')
+                old.chmod(0o755)
+                result = self.install('--apply', family='standard', provider=old)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("model, arguments, or eligible accounts do not match", result.stderr)
+                self.assertEqual({p.name: p.read_bytes() for p in self.models.iterdir()}, before)
+                self.assertEqual((self.config / 'providers.toml').read_text(), self.original_providers)
+                self.assertFalse((self.config / 'backups').exists())
 
     def test_checked_in_standard_and_named_astra_examples(self):
         self.assertFalse(list((REPO / 'examples/models').glob('codex-gpt-*.toml')))
-        for prefix in ['gpt', 'gpt-astra']:
-            for label in EFFORTS:
-                route = tomllib.loads((REPO / f'examples/models/{prefix}-{label}.toml').read_text())
-                model = 'gpt-6-sol' if prefix == 'gpt' else 'gpt-6-astra'
-                expected = ['-m', model, '-c', f'model_reasoning_effort="{label}"']
-                for account in route['providers']:
-                    self.assertEqual(account['args'], expected)
-                    self.assertEqual(account['interactive_args'], expected)
+        self.assert_standard_routes(REPO / 'examples/models')
+        for label in EFFORTS:
+            route = tomllib.loads((REPO / f'examples/models/gpt-astra-{label}.toml').read_text())
+            expected = ['-m', 'gpt-6-astra', '-c', f'model_reasoning_effort="{label}"']
+            for account in route['providers']:
+                self.assertEqual(account['args'], expected)
+                self.assertEqual(account['interactive_args'], expected)
 
     def test_luna_apply_preserves_other_labels_and_backs_up_replaced_routes(self):
         self.assert_family_apply('luna')
@@ -186,7 +188,7 @@ class LabelInstallerTests(unittest.TestCase):
             self.assertEqual(route['provider']['path'], str(PROVIDER))
             self.assertEqual([p['name'] for p in route['providers']], ACCOUNTS)
             for account in route['providers']:
-                model = 'gpt-5.6-terra' if family == 'terra' else f'gpt-6-{family}'
+                model = 'gpt-6.1-sol' if family == 'sol' else 'gpt-5.6-terra' if family == 'terra' else f'gpt-6-{family}'
                 expected = ['-m', model, '-c', f'model_reasoning_effort="{effort}"']
                 self.assertEqual(account['args'], expected)
                 self.assertEqual(account['interactive_args'], expected)
@@ -219,10 +221,23 @@ class LabelInstallerTests(unittest.TestCase):
     def test_missing_sol_route_rejects_apply_without_mutation(self):
         self.assert_missing_route('sol', 'xhigh')
 
+    def test_missing_gpt_alias_rejects_apply_without_mutation(self):
+        self.standard_fixture()
+        self.assert_missing_route('standard', None)
+
+    def test_standard_apply_creates_missing_gpt_alias(self):
+        self.standard_fixture()
+        (self.models / 'gpt.toml').unlink()
+        result = self.install('--apply', family='standard')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_standard_routes(self.models)
+        backup = next((self.config / 'backups').glob('codex-sol-*'))
+        self.assertFalse((backup / 'models/gpt.toml').exists())
+
     def assert_missing_route(self, family, effort):
         before = {path.name: path.read_text() for path in self.models.glob('*.toml')}
         old = self.root / 'incomplete-provider'
-        missing = f'gpt-{family}-{effort}'
+        missing = 'gpt' if family == 'standard' else f'gpt-{family}-{effort}'
         old.write_text('#!/usr/bin/env python3\nimport json,subprocess,sys\n'
                        f'result=subprocess.run([{str(PROVIDER)!r}, *sys.argv[1:]], input=sys.stdin.read(), capture_output=True, text=True)\n'
                        'response=json.loads(result.stdout)\n'

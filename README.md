@@ -12,7 +12,8 @@ Codex-specific launch and rollout handling replace OpenCode's native boundaries.
 
 ## Models and accounts
 
-Standard labels `gpt-{low,medium,high,xhigh,max}` select `gpt-6-sol` with the
+`gpt` selects `gpt-6.1-sol` at native `high` effort.
+Standard labels `gpt-{low,medium,high,xhigh,max}` select `gpt-6.1-sol` with the
 matching native reasoning effort. These routes do not cap high, xhigh, or max.
 The `gpt-astra-{low,medium,high,xhigh,max}` labels select `gpt-6-astra` with
 their matching native efforts and are distinct from the standard Sol aliases.
@@ -20,7 +21,7 @@ Native sub-agent delegation remains disabled for every label.
 
 `gpt-luna-{low,medium,high,xhigh,max}`, `gpt-terra-{low,medium,high,xhigh,max}`,
 and `gpt-sol-{low,medium,high,xhigh,max}` use the same Codex adapter and five-account
-pool with `gpt-6-luna`, `gpt-5.6-terra`, and `gpt-6-sol`, respectively. Each label selects its
+pool with `gpt-6-luna`, `gpt-5.6-terra`, and `gpt-6.1-sol`, respectively. Each label selects its
 corresponding native reasoning effort. No family registers `ultra`.
 
 Quota probing uses the installed `~/.local/bin/chatgpt-usage` adapter against
@@ -96,8 +97,9 @@ and system instruction inputs for PTY sessions, subject to native effective poli
 Account `system_prompt_override` is read from `providers.toml` and passed as developer instructions. The runner
 retains terminal rendering, input, process ownership, and notification delivery.
 The Bash bridge preserves interactive delivery and cancellation behavior even
-though MCP itself uses pipes. Sessionless managed PTY launches default to
-`gpt-xhigh`, hence Sol/xhigh.
+though MCP itself uses pipes. Managed PTY launches with no model selection default to
+`gpt`, hence Sol 6.1/high. Provider-neutral defaults and role selection belong
+in shared dispatch; this adapter resolves only its Codex model catalog.
 Explicit model labels select their catalog model and effort. Exact native
 `-m gpt-6-astra -c 'model_reasoning_effort="xhigh"'` (or high/max) PTY
 arguments retain that native effort via the named Astra catalog.
@@ -259,22 +261,24 @@ agents -m gpt-astra-high -p /path/to/project 'Your task'
 
 The default label installer preserves existing standard labels and backs up the
 provider configuration before changing Codex implementation paths and assigning
-canonical account settings IDs. To move the five standard `gpt-*` labels to
-Codex Sol after validating the provider, stage and apply the promotion:
+canonical account settings IDs. To register `gpt` at high and move the five
+standard `gpt-*` labels to Codex Sol 6.1 after validating the provider, stage and
+apply the promotion:
 
 ```sh
 python3 scripts/install-labels.py --standard-labels --stage-root /tmp/agent-runner-standard-sol-labels
 python3 scripts/install-labels.py --standard-labels --stage-root /tmp/agent-runner-standard-sol-labels --apply
-agents -m gpt-high -p /path/to/project 'Your task'
+agents -m gpt -p /path/to/project 'Your task'
 ```
 
-Standard-label staging includes all five routes. Applying backs up and replaces
-only changed route files; already-equivalent Sol routes keep their exact bytes,
-including comments and formatting. On an existing standard Astra setup, all five
-routes change to Sol with matching efforts. Both label families use the same Codex
+Standard-label staging includes `gpt` plus all five effort-qualified routes.
+Applying backs up and replaces only changed route files; already-equivalent Sol routes keep their exact bytes,
+including comments and formatting. On an existing standard Astra or Sol 6 setup,
+the five effort-qualified routes change to Sol 6.1 with matching efforts, and
+`gpt` is created or updated to Sol 6.1/high. Both label families use the same Codex
 accounts, system prompt, and Bash tool configuration. The installed provider must
-advertise the new arguments before activation; stale standard Astra argument pairs
-are rejected, not silently accepted or rewritten.
+advertise every selected route with the new arguments before activation. Stale
+standard Astra and Sol 6 argument pairs are rejected during admission.
 
 To register all five Luna efforts with Codex, including the existing low/max
 labels:
@@ -291,7 +295,7 @@ python3 scripts/install-labels.py --terra-labels --stage-root /tmp/agent-runner-
 python3 scripts/install-labels.py --terra-labels --stage-root /tmp/agent-runner-terra-labels --apply
 ```
 
-To register the equivalent Sol family:
+To register the equivalent Sol 6.1 family:
 
 ```sh
 python3 scripts/install-labels.py --sol-labels --stage-root /tmp/agent-runner-sol-labels
@@ -299,9 +303,10 @@ python3 scripts/install-labels.py --sol-labels --stage-root /tmp/agent-runner-so
 ```
 
 Each mode backs up existing routes in its selected family and creates missing
-efforts. The installer checks that the installed provider advertises all five
-routes before applying them. Other model families, default routing, and benchmark
-routes remain unchanged. Install the updated provider and managed catalog first.
+efforts. The installer checks that the installed provider advertises every selected
+route before applying it. Other model families, the configured default provider,
+and benchmark routes remain unchanged. Install the updated provider and managed
+catalog first.
 
 `examples/benchmark-models/codex-exec-bench.toml` is a separately named
 `gpt-6-luna`/`low` live-test route. Use it in isolated runner configuration; the

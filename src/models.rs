@@ -2,9 +2,10 @@ use serde_json::{json, Value};
 pub const ASTRA: &str = "gpt-6-astra";
 pub const LUNA: &str = "gpt-6-luna";
 pub const TERRA: &str = "gpt-5.6-terra";
-pub const SOL: &str = "gpt-6-sol";
+pub const SOL: &str = "gpt-6.1-sol";
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 pub const BENCH: &str = "codex-exec-bench";
+pub const GPT: &str = "gpt";
 const FAMILIES: &[(&str, &str)] = &[
     ("gpt-", SOL),
     ("gpt-astra-", ASTRA),
@@ -15,6 +16,7 @@ const FAMILIES: &[(&str, &str)] = &[
 
 pub fn route(name: &str) -> Option<(&'static str, &'static str)> {
     match name {
+        GPT => Some((SOL, "high")),
         BENCH => Some((LUNA, "low")),
         _ => FAMILIES
             .iter()
@@ -50,13 +52,12 @@ fn catalog_entry(name: String) -> Value {
 }
 
 pub fn catalog() -> Vec<Value> {
-    FAMILIES
-        .iter()
-        .flat_map(|(prefix, _)| {
+    std::iter::once(GPT.to_owned())
+        .chain(FAMILIES.iter().flat_map(|(prefix, _)| {
             EFFORTS
                 .iter()
                 .map(move |effort| format!("{prefix}{effort}"))
-        })
+        }))
         .map(catalog_entry)
         .collect()
 }
