@@ -75,6 +75,12 @@ class IdleInputTests(unittest.TestCase):
         integrations = self.root / 'config/agent-runner-codex/integrations'
         expected = REPO / 'integrations/opencode/tools/bash.ts'
         self.assertEqual((integrations / 'opencode/tools/bash.ts').read_bytes(), expected.read_bytes())
+        catalog = json.loads((integrations / 'codex/models.json').read_text())
+        sol = [model for model in catalog['models'] if model['slug'] == 'gpt-6.1-sol']
+        self.assertEqual(len(sol), 1)
+        self.assertIn('high', [level['effort'] for level in sol[0]['supported_reasoning_levels']])
+        self.assertTrue(sol[0]['node_repl_disabled'])
+        self.assertIsNone(sol[0]['apply_patch_tool_type'])
         self.assertEqual(hashlib.sha256(expected.read_bytes()).hexdigest(),
                          '64e82c7a8677122155d7e6a9955fa87dd8d31cc491b8d922a178b250c2e47bc8')
         self.assertIn('../opencode/tools/bash.ts',

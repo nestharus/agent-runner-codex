@@ -121,7 +121,7 @@ fn prepare(args: &[String]) -> Result<(Command, RequestEnvelope), ProviderFailur
     let settings_id = options.settings_id.as_deref().unwrap();
     let label = match (&options.model, &options.native_model, &options.native_effort) {
         (Some(label), None, None) => label.clone(),
-        (None, None, None) => "gpt-xhigh".into(),
+        (None, None, None) => models::GPT.into(),
         (None, Some(model), Some(effort)) => models::catalog().into_iter()
             .find(|entry| entry["provider_model"] == *model && entry["provider_args"][3] == *effort)
             .and_then(|entry| entry["name"].as_str().map(str::to_owned))
@@ -319,7 +319,7 @@ fn prepare(args: &[String]) -> Result<(Command, RequestEnvelope), ProviderFailur
 
 pub fn run(args: &[String]) -> i32 {
     if args == ["--help"] || args == ["-h"] {
-        println!("agent-runner-codex interactive --settings-id ACCOUNT [--config-root PATH] [--model LABEL] [--resume UUID] [--prompt TEXT]\n\nManaged Codex TUI with Agent Bash. The default model is gpt-xhigh.\nIntegration validation covers staged payloads and emitted settings, not permission under native effective policy. Native Codex enforces system/managed/cloud policy at startup; hooks may be excluded or settings redirected. Missing exact registration remains an error. Check native policy with its administrator rather than changing trust to bypass it.\nExact legacy -m MODEL -c 'model_reasoning_effort=\"EFFORT\"' selection is also supported.");
+        println!("agent-runner-codex interactive --settings-id ACCOUNT [--config-root PATH] [--model LABEL] [--resume UUID] [--prompt TEXT]\n\nManaged Codex TUI with Agent Bash. The default model is gpt (gpt-6.1-sol at high effort).\nIntegration validation covers staged payloads and emitted settings, not permission under native effective policy. Native Codex enforces system/managed/cloud policy at startup; hooks may be excluded or settings redirected. Missing exact registration remains an error. Check native policy with its administrator rather than changing trust to bypass it.\nExact legacy -m MODEL -c 'model_reasoning_effort=\"EFFORT\"' selection is also supported.");
         return 0;
     }
     let (mut command, request) = match prepare(args) {

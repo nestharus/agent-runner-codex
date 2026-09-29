@@ -116,7 +116,7 @@ fn named_model_interactive_routes_preserve_every_effort_and_account() {
         ("astra", "gpt-6-astra"),
         ("luna", "gpt-6-luna"),
         ("terra", "gpt-5.6-terra"),
-        ("sol", "gpt-6-sol"),
+        ("sol", "gpt-6.1-sol"),
     ] {
         for account in ["codex", "codex2", "codex3", "codex4", "codex5"] {
             for effort in ["low", "medium", "high", "xhigh", "max"] {
@@ -265,7 +265,12 @@ fn changed_or_future_native_banner_does_not_probe_or_block_tui_spawn() {
 #[test]
 fn default_and_exact_legacy_model_routes_are_managed() {
     for (args, model, effort) in [
-        (vec![], "gpt-6-sol", "xhigh"),
+        (vec![], "gpt-6.1-sol", "high"),
+        (
+            vec!["-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=\"high\""],
+            "gpt-6.1-sol",
+            "high",
+        ),
         (
             vec!["-m", "gpt-6-luna", "-c", "model_reasoning_effort=\"max\""],
             "gpt-6-luna",
@@ -284,13 +289,14 @@ fn default_and_exact_legacy_model_routes_are_managed() {
 #[test]
 fn standard_sol_and_named_astra_routes_remain_distinct() {
     for (label, effort) in [
+        ("gpt", "high"),
         ("gpt-low", "low"),
         ("gpt-medium", "medium"),
         ("gpt-high", "high"),
         ("gpt-xhigh", "xhigh"),
         ("gpt-max", "max"),
     ] {
-        assert_model_interactive(&["--model", label], "gpt-6-sol", effort);
+        assert_model_interactive(&["--model", label], "gpt-6.1-sol", effort);
     }
     for (label, effort) in [
         ("gpt-astra-low", "low"),

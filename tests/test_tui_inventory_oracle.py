@@ -120,7 +120,7 @@ class InventoryOracleTest(unittest.TestCase):
                 calls, requests = valid_request_pair()
                 second = requests[1]
                 if change == "model":
-                    second["model"] = "gpt-6-sol"
+                    second["model"] = "gpt-6.1-sol"
                 elif change == "effort":
                     second["reasoning"]["effort"] = "high"
                 elif change == "extra_tool":

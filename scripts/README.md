@@ -72,9 +72,9 @@ provider stay unchanged. A differing existing `gpt-astra-*` label causes an
 error before installation; use `--astra-labels` to stage its reviewed replacement
 with the same backup behavior as the other explicit family modes.
 
-To promote the standard `gpt-low`, `gpt-medium`, `gpt-high`, `gpt-xhigh`, and
-`gpt-max` names to Codex Sol, stage and apply with the explicit standard-label
-mode:
+To register `gpt` at high and promote the standard `gpt-low`, `gpt-medium`,
+`gpt-high`, `gpt-xhigh`, and `gpt-max` names to Codex Sol 6.1, stage and apply
+with the explicit standard-label mode:
 
 ```bash
 python3 scripts/install-labels.py --standard-labels \
@@ -83,14 +83,15 @@ python3 scripts/install-labels.py --standard-labels \
   --stage-root /tmp/codex-standard-labels --apply
 ```
 
-Review `models.patch` before applying. Every standard label selects `gpt-6-sol`
-at the matching native effort, including high, xhigh, and max. The managed
-no-model PTY default remains `gpt-xhigh`, now Sol/xhigh. The preserved
+Review `models.patch` before applying. `gpt` selects `gpt-6.1-sol` at high.
+Every effort-qualified standard label selects Sol 6.1 at the matching native
+effort, including high, xhigh, and max. The managed no-model PTY default is
+`gpt`, hence Sol 6.1/high. The preserved
 `gpt-astra-*` routes select Astra at matching efforts; exact native PTY argument
 pairs remain supported.
 
-This mode stages all five model files, but equivalent existing Sol routes retain
-their bytes, including comments and formatting. Only changed files are replaced
+This mode stages six model files (`gpt` plus five effort-qualified routes).
+Equivalent existing Sol routes retain their bytes, including comments and formatting. Only changed files are replaced
 and their previous contents saved under `backups/codex-sol-*/models/`
 alongside the provider configuration backup. It preserves the named
 `gpt-astra-*` aliases, other model labels, and the configured default provider.
@@ -98,7 +99,8 @@ Before any mode applies routing changes, the installed provider must
 advertise every target label with the exact selected model, reasoning arguments,
 and all five eligible accounts. Install the updated provider first when
 promoting the standard labels. Stale high/xhigh/max route arguments are rejected
-by strict headless admission; stale Astra routes at any effort are also rejected.
+by strict headless admission; stale Astra and Sol 6 routes at any effort are
+also rejected.
 Update the source-backed routes with this mode
 rather than adding arbitrary argument overrides.
 
@@ -134,7 +136,7 @@ Terra uses the same account pool and saves replaced routes under
 `backups/codex-terra-*/models/`.
 
 To register `gpt-sol-low`, `gpt-sol-medium`, `gpt-sol-high`, `gpt-sol-xhigh`,
-and `gpt-sol-max` with `gpt-6-sol`:
+and `gpt-sol-max` with `gpt-6.1-sol`:
 
 ```bash
 python3 scripts/install-labels.py --sol-labels --stage-root /tmp/codex-sol-labels

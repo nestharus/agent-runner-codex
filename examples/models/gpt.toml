@@ -1,4 +1,4 @@
-# Codex Sol route for the standard model label.
+# Codex Sol 6.1 at high effort for the gpt alias.
 provider = { binary = "agent-runner-codex" }
 
 [[inputs]]

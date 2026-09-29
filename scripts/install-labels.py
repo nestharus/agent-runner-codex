@@ -177,11 +177,11 @@ def main():
     parser.add_argument("--stage-root", type=Path, required=True, help="Directory for reviewable labels and provider diff")
     parser.add_argument("--provider-path", type=Path, help="Installed provider binary; defaults to CONFIG_ROOT/agent-runner-codex/agent-runner-codex")
     selection = parser.add_mutually_exclusive_group()
-    selection.add_argument("--standard-labels", action="store_true", help="Route gpt-low/medium/high/xhigh/max to Codex Sol at matching efforts, backing up and replacing existing labels")
+    selection.add_argument("--standard-labels", action="store_true", help="Route gpt to Codex Sol 6.1/high and gpt-low/medium/high/xhigh/max at matching efforts, backing up and replacing existing labels")
     selection.add_argument("--astra-labels", action="store_true", help="Register gpt-astra-low/medium/high/xhigh/max with Codex Astra, backing up and replacing existing labels")
     selection.add_argument("--luna-labels", action="store_true", help="Register gpt-luna-low/medium/high/xhigh/max with Codex Luna, backing up and replacing existing labels")
     selection.add_argument("--terra-labels", action="store_true", help="Register gpt-terra-low/medium/high/xhigh/max with Codex Terra, backing up and replacing existing labels")
-    selection.add_argument("--sol-labels", action="store_true", help="Register gpt-sol-low/medium/high/xhigh/max with Codex Sol, backing up and replacing existing labels")
+    selection.add_argument("--sol-labels", action="store_true", help="Register gpt-sol-low/medium/high/xhigh/max with Codex Sol 6.1, backing up and replacing existing labels")
     parser.add_argument("--apply", action="store_true", help="Install after the Codex provider binary has been validated")
     args = parser.parse_args()
     provider_path = (args.provider_path or args.config_root/"agent-runner-codex/agent-runner-codex").expanduser().absolute()
@@ -198,8 +198,10 @@ def main():
     )))
     family = "luna" if args.luna_labels else "terra" if args.terra_labels else "sol" if (args.sol_labels or args.standard_labels) else "astra"
     prefix = "gpt" if args.standard_labels else f"gpt-{family}"
-    model = "gpt-5.6-terra" if family == "terra" else f"gpt-6-{family}"
+    model = "gpt-6.1-sol" if family == "sol" else "gpt-5.6-terra" if family == "terra" else f"gpt-6-{family}"
     models = {f"{prefix}-{effort}.toml":model_text(effort, provider_path, model) for effort in EFFORTS}
+    if args.standard_labels:
+        models["gpt.toml"] = model_text("high", provider_path, model)
     models = {name: staged_model_text(args.config_root/"models"/name, text)
               for name, text in models.items()}
     model_diffs = []

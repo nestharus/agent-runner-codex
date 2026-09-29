@@ -256,15 +256,15 @@ def main():
     parser.add_argument('--binary', type=explicit_executable, required=True)
     parser.add_argument('--native-codex', type=explicit_executable, required=True, help='Explicit isolated native host; never discovered through PATH')
     parser.add_argument('--bun', type=explicit_executable, required=True)
-    parser.add_argument('--label', default='gpt-luna-low', choices=[prefix+e for prefix in ['gpt-', 'gpt-astra-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']])
-    parser.add_argument('--no-model', action='store_true', help='Omit --model to check the managed gpt-xhigh default (Sol/xhigh)')
+    parser.add_argument('--label', default='gpt-luna-low', choices=[prefix+e for prefix in ['gpt-', 'gpt-astra-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']]+['gpt'])
+    parser.add_argument('--no-model', action='store_true', help='Omit --model to check the managed gpt default (Sol 6.1/high)')
     parser.add_argument('--output-dir', type=Path)
     args = parser.parse_args()
     require_private_boundary(args.boundary_report)
     args.binary = args.binary.resolve()
     if args.no_model:
-        args.label = 'gpt-xhigh'
-    effort = args.label.rsplit('-', 1)[1]
+        args.label = 'gpt'
+    effort = 'high' if args.label == 'gpt' else args.label.rsplit('-', 1)[1]
     repo = Path(__file__).resolve().parents[1]
     root = (args.output_dir or Path(tempfile.mkdtemp(prefix='codex-tui-inventory-'))).absolute()
     if args.output_dir:
@@ -353,7 +353,7 @@ def main():
         model=('gpt-6-luna' if args.label.startswith('gpt-luna-')
                else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
                else 'gpt-6-astra' if args.label.startswith('gpt-astra-')
-               else 'gpt-6-sol' if args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
+               else 'gpt-6.1-sol' if args.label == 'gpt' or args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
         instructions=Path(runtime['system_prompt_file']).read_text().rstrip()
         calls=[json.loads(line) for line in (root/'bash-calls.jsonl').read_text().splitlines()]
         session=reports[0]['provider_session_id']

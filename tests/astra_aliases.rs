@@ -3,11 +3,13 @@ use agent_runner_codex::models;
 
 #[test]
 fn standard_alias_mapping_and_preserved_native_families() {
+    assert_eq!(models::route("gpt"), Some(("gpt-6.1-sol", "high")));
+    assert_eq!(models::route("default"), None);
     for effort in ["low", "medium", "high", "xhigh", "max"] {
         let label = format!("gpt-{effort}");
         assert_eq!(
             models::route(&label),
-            Some(("gpt-6-sol", effort)),
+            Some(("gpt-6.1-sol", effort)),
             "{label}"
         );
     }
@@ -19,7 +21,7 @@ fn compatibility_named_and_benchmark_routes_keep_native_efforts() {
         ("gpt-astra-", "gpt-6-astra"),
         ("gpt-luna-", "gpt-6-luna"),
         ("gpt-terra-", "gpt-5.6-terra"),
-        ("gpt-sol-", "gpt-6-sol"),
+        ("gpt-sol-", "gpt-6.1-sol"),
     ] {
         assert_native_family(prefix, model);
     }

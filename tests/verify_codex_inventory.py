@@ -32,7 +32,7 @@ def prompt_evidence(body, instructions):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path('target/debug/agent-runner-codex'))
-    parser.add_argument('--label', choices=[prefix+e for prefix in ['gpt-', 'gpt-astra-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']]+['codex-exec-bench'], default='gpt-high')
+    parser.add_argument('--label', choices=[prefix+e for prefix in ['gpt-', 'gpt-astra-', 'gpt-luna-', 'gpt-terra-', 'gpt-sol-'] for e in ['low','medium','high','xhigh','max']]+['gpt', 'codex-exec-bench'], default='gpt-high')
     parser.add_argument('--output-dir', type=Path, help='Preserve isolated config, native request and raw results in a new directory')
     parser.add_argument('--positive-control', action='store_true', help='Remove user-config isolation and prove the injected project MCP appears')
     args = parser.parse_args()
@@ -40,8 +40,8 @@ def main():
     model = ('gpt-6-luna' if args.label == 'codex-exec-bench' or args.label.startswith('gpt-luna-')
              else 'gpt-5.6-terra' if args.label.startswith('gpt-terra-')
              else 'gpt-6-astra' if args.label.startswith('gpt-astra-')
-             else 'gpt-6-sol' if args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
-    effort = 'low' if args.label == 'codex-exec-bench' else args.label.rsplit('-', 1)[-1]
+             else 'gpt-6.1-sol' if args.label == 'gpt' or args.label.startswith(('gpt-sol-', 'gpt-')) else 'gpt-6-astra')
+    effort = 'low' if args.label == 'codex-exec-bench' else 'high' if args.label == 'gpt' else args.label.rsplit('-', 1)[-1]
     route_args = ['-m', model, '-c', 'model_reasoning_effort='+json.dumps(effort)]
     captured = []
     class Handler(http.server.BaseHTTPRequestHandler):

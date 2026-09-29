@@ -16,15 +16,30 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
     );
     let response: Value = serde_json::from_slice(&output).unwrap();
     let entries = response["result"]["models"].as_array().unwrap();
-    assert_eq!(entries.len(), 25);
+    assert_eq!(entries.len(), 26);
+    let gpt: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry["name"] == "gpt")
+        .collect();
+    assert_eq!(gpt.len(), 1);
+    assert_eq!(gpt[0]["provider_model"], "gpt-6.1-sol");
+    assert_eq!(
+        gpt[0]["provider_args"],
+        json!(["-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=\"high\""])
+    );
+    assert_eq!(
+        gpt[0]["eligible_accounts"],
+        json!(["codex", "codex2", "codex3", "codex4", "codex5"])
+    );
+    assert!(!entries.iter().any(|entry| entry["name"] == "default"));
     let metadata: Value =
         serde_json::from_str(include_str!("../integrations/codex/models.json")).unwrap();
     for (prefix, model) in [
-        ("gpt-", "gpt-6-sol"),
+        ("gpt-", "gpt-6.1-sol"),
         ("gpt-astra-", "gpt-6-astra"),
         ("gpt-luna-", "gpt-6-luna"),
         ("gpt-terra-", "gpt-5.6-terra"),
-        ("gpt-sol-", "gpt-6-sol"),
+        ("gpt-sol-", "gpt-6.1-sol"),
     ] {
         let native = metadata["models"]
             .as_array()
