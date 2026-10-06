@@ -29,6 +29,34 @@ the task worktree and branch when complete.
 - Keep credentials, tokens, and machine-specific state out of source control,
   argv, fixtures, benchmark reports, and errors.
 
+## Runtime compatibility
+
+- Determine runtime compatibility from declared supported wire schemas and
+  capability agreement. Native CLI banners, SDK source revisions, package
+  versions, and executable byte identity must not be equality requirements for
+  provider compatibility.
+- Consume SDK source without an explicit manifest source-revision constraint.
+  Normal Cargo lockfile revisions record resolved builds; update them through
+  Cargo tooling. They are build evidence, not runtime admission authority.
+- Compatible provider rebuilds and updates must remain usable automatically,
+  without a manual restart. Refresh schema/capability agreement when the provider
+  changes; an old executable handle or cached agreement must not permanently
+  exclude a compatible replacement.
+- Record execution/process identity for custody and audit without making it a
+  permanent compatibility gate or adding binary/source identity to request
+  compatibility keys. Preserve compatible durable state and completed replay.
+- Preserve actor recovery safeguards: validate PGIDs in `2..=i32::MAX` before
+  probes/signals, retain incarnation checks and native process-group custody,
+  and require reconciliation for incomplete work. Identity used to recover a
+  specific actor has a different purpose from provider compatibility.
+
+Current integration uses fixed-v1 validation and capability agreement. General
+supported-version selection and automatic refreshed Runner agreement after
+replacement remain unfinished; do not advertise a second wire version before
+the host can select a common supported version. The shared lifecycle foundation
+and cross-build replay/update qualification are separate unfinished work. These
+rules state requirements, not a claim that those mechanisms are implemented.
+
 ## Tests
 
 - Use deterministic fake-server fixtures for contract and lifecycle coverage.

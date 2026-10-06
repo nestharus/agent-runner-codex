@@ -220,11 +220,11 @@ The effect gate, process-group custody, bounded CLI output delivery, request
 locks, durable launch state, journal replay, launch-event framing, signal
 recording, and durable filesystem and encoding helpers come from the
 `agent-provider-execution` crate in
-[agent-provider-sdk](https://github.com/nestharus/agent-provider-sdk), pinned by
-Git revision in `Cargo.toml`. This adapter supplies its gate argument and
-descriptor variable, state root, request digest inputs, failure codes, native
-argv, environment, and Codex event translation. The on-disk launch-state layout
-and field names are unchanged.
+[agent-provider-sdk](https://github.com/nestharus/agent-provider-sdk), consumed
+without a manifest source-revision constraint. This adapter supplies its gate
+argument and descriptor variable, state root, request digest inputs, failure
+codes, native argv, environment, and Codex event translation. The on-disk
+launch-state layout and field names are unchanged.
 
 Session capture, lookup, reads, and enumeration understand native Codex JSONL
 rollouts, including archived sessions, fork metadata, partial trailing writes,
@@ -243,7 +243,19 @@ being exposed as a Codex capability with different semantics.
 
 ## Build and install
 
-Cargo fetches the pinned SDK revision from its public GitHub repository.
+Cargo resolves SDK source from its public GitHub repository. `Cargo.lock`
+records the resolved commit for reproducible builds; it is not a runtime
+compatibility pin. Use `cargo update -p agent-provider-execution` to refresh the
+SDK resolution, then verify the adapter before delivery.
+
+Runtime compatibility must follow declared wire schemas and capability
+agreement. Compatible rebuilds/updates must remain usable automatically without
+manual restart; CLI banners, source revisions, and executable bytes must not
+be equality gates. Current integration has fixed-v1 validation and capability
+agreement; general version selection and automatic refreshed Runner agreement
+remain unfinished. The shared lifecycle foundation and cross-build replay/update
+qualification are separate work. This dependency/documentation correction adds
+none of those runtime mechanisms.
 
 ```sh
 cargo test
