@@ -1,21 +1,24 @@
-//! Stable `codex exec --json` adapter, using the copied native process gate and
-//! process-group custody. Requests are journaled before output is published.
+//! Stable `codex exec --json` adapter over the SDK's native effect gate,
+//! process-group custody, request custody, and launch-event framing. Requests
+//! are journaled before output is published.
 use crate::{
     account,
-    encoding::{encode_base64, now_unix_ms, sha256_hex},
+    encoding::{now_unix_ms, sha256_hex},
     envelope::{ProviderFailure, RequestEnvelope, CONTRACT},
     native_process,
     policy::{self, Plan, RuntimeConfig},
     terminal,
 };
-use fs2::FileExt;
-use serde::{Deserialize, Serialize};
+use agent_provider_execution::{
+    custody::{self, CustodyError, LaunchState, RequestCustody},
+    framing::{FramingError, LaunchEventWriter},
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    fs::OpenOptions,
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::mpsc,
@@ -116,66 +119,18 @@ impl OutputSummary {
     }
 }
 
-fn replay_journal<W: Write>(
-    path: &Path,
-    state: &State,
-    writer: &mut W,
-) -> Result<(), ProviderFailure> {
-    let mut file = File::open(path).map_err(|_| {
-        failure(
-            "launch_journal_invalid",
-            "Completed launch journal is missing",
-        )
-    })?;
-    if Some(file.metadata().map_err(io_failure)?.len()) != state.journal_len {
-        return Err(failure(
-            "launch_journal_invalid",
-            "Completed launch journal does not match its durable receipt",
-        ));
-    }
-    let mut hash = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let count = file.read(&mut buffer).map_err(io_failure)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&buffer[..count]);
-    }
-    if state.journal_sha256.as_deref() != Some(format!("{:x}", hash.finalize()).as_str()) {
-        return Err(failure(
-            "launch_journal_invalid",
-            "Completed launch journal does not match its durable receipt",
-        ));
-    }
-    file.seek(SeekFrom::Start(0)).map_err(io_failure)?;
-    std::io::copy(&mut file, writer).map_err(io_failure)?;
-    writer.flush().map_err(io_failure)
-}
 const STREAM_CLOSE_GRACE: Duration = Duration::from_secs(2);
-static CANCEL_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-
-#[cfg(unix)]
-extern "C" fn record_cancel_signal(signal: i32) {
-    CANCEL_SIGNAL.store(signal, std::sync::atomic::Ordering::Relaxed);
-}
 
 fn install_cancellation_handlers() {
     #[cfg(unix)]
-    {
-        static INSTALLED: std::sync::Once = std::sync::Once::new();
-        INSTALLED.call_once(|| unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = record_cancel_signal as *const () as usize;
-            libc::sigemptyset(&mut action.sa_mask);
-            libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
-            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
-        });
-    }
+    agent_provider_execution::cancellation::install_termination_handlers();
 }
 
 fn cancel_requested() -> bool {
-    CANCEL_SIGNAL.load(std::sync::atomic::Ordering::Relaxed) != 0
+    #[cfg(unix)]
+    return agent_provider_execution::cancellation::termination_requested();
+    #[cfg(not(unix))]
+    false
 }
 
 fn deadline_elapsed(request: &RequestEnvelope) -> bool {
@@ -220,17 +175,6 @@ fn publish_session(path: &Path, id: &str) -> Result<(), ProviderFailure> {
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-struct State {
-    digest: String,
-    phase: String,
-    actor_id: Option<u32>,
-    incarnation: Option<String>,
-    exit_code: Option<i32>,
-    journal_sha256: Option<String>,
-    journal_len: Option<u64>,
-}
-
 struct ChildGuard(Child, bool);
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -247,52 +191,52 @@ fn io_failure(error: std::io::Error) -> ProviderFailure {
     failure("launch_io", error.to_string())
 }
 
-fn write_state(path: &Path, state: &State) -> Result<(), ProviderFailure> {
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(io_failure)?;
-    serde_json::to_writer(&mut temporary, state)
-        .map_err(|e| failure("launch_state_write", e.to_string()))?;
-    temporary.as_file().sync_all().map_err(io_failure)?;
-    temporary.persist(path).map_err(|e| io_failure(e.error))?;
-    File::open(path.parent().unwrap())
-        .and_then(|f| f.sync_all())
-        .map_err(io_failure)
+fn custody_failure(error: CustodyError) -> ProviderFailure {
+    match error {
+        CustodyError::Busy => ProviderFailure::retryable_conflict(
+            "",
+            "launch_busy",
+            "This request is already executing",
+            json!({}),
+        ),
+        CustodyError::InvalidState => failure("launch_state_invalid", "Invalid launch state"),
+        CustodyError::StateWrite(message) => failure("launch_state_write", message),
+        CustodyError::JournalMissing => failure(
+            "launch_journal_invalid",
+            "Completed launch journal is missing",
+        ),
+        CustodyError::JournalMismatch => failure(
+            "launch_journal_invalid",
+            "Completed launch journal does not match its durable receipt",
+        ),
+        CustodyError::JournalOverflow => framing_failure(FramingError::Overflow),
+        CustodyError::Io(error) => io_failure(error),
+    }
+}
+
+fn framing_failure(error: FramingError) -> ProviderFailure {
+    match error {
+        FramingError::Overflow => failure(
+            "launch_output_accounting",
+            "Launch journal byte count overflowed",
+        ),
+        FramingError::Io(error) => io_failure(error),
+    }
 }
 
 struct Stream<'a, W: Write> {
-    writer: &'a mut W,
-    journal: File,
-    request_id: &'a str,
-    seq: u64,
-    bytes: u64,
-    journal_sha256: Sha256,
+    events: LaunchEventWriter<'a, W>,
     output: OutputSummary,
 }
 impl<W: Write> Stream<'_, W> {
-    fn event(&mut self, mut event: Value) -> Result<(), ProviderFailure> {
-        self.seq += 1;
-        event["contract"] = json!(CONTRACT);
-        event["request_id"] = json!(self.request_id);
-        event["seq"] = json!(self.seq);
-        event["time_unix_ms"] = json!(now_unix_ms());
-        let mut bytes = serde_json::to_vec(&event).unwrap();
-        bytes.push(b'\n');
-        self.bytes = self.bytes.checked_add(bytes.len() as u64).ok_or_else(|| {
-            failure(
-                "launch_output_accounting",
-                "Launch journal byte count overflowed",
-            )
-        })?;
-        self.journal.write_all(&bytes).map_err(io_failure)?;
-        self.journal_sha256.update(&bytes);
-        self.writer.write_all(&bytes).map_err(io_failure)?;
-        self.writer.flush().map_err(io_failure)
+    fn event(&mut self, event: Value) -> Result<(), ProviderFailure> {
+        self.events.event(event).map_err(framing_failure)
     }
     fn marker(&mut self, name: &str, value: Value) -> Result<(), ProviderFailure> {
-        self.event(json!({"kind":"marker", "name":name, "value":value}))
+        self.events.marker(name, value).map_err(framing_failure)
     }
     fn bytes(&mut self, kind: &str, bytes: &[u8]) -> Result<(), ProviderFailure> {
-        self.event(json!({"kind":kind,"data_base64":encode_base64(bytes)}))?;
+        self.events.data(kind, bytes).map_err(framing_failure)?;
         self.output.accept(kind, bytes)
     }
 }
@@ -452,26 +396,10 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         .unwrap_or_else(|| user.join(".local/share/oulipoly-agent-runner"));
     let state_root = root.join("provider-state/codex/launch");
     crate::durable_fs::create_private_directories(&state_root).map_err(io_failure)?;
-    let key = sha256_hex(
-        &serde_json::to_vec(&json!([request.provider_instance_id, request.request_id])).unwrap(),
-    );
-    let state_path = state_root.join(format!("{key}.json"));
-    let journal_path = state_root.join(format!("{key}.jsonl"));
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(state_root.join(format!("{key}.lock")))
-        .map_err(io_failure)?;
-    lock.try_lock_exclusive().map_err(|_| {
-        ProviderFailure::retryable_conflict(
-            "",
-            "launch_busy",
-            "This request is already executing",
-            json!({}),
-        )
-    })?;
+    let key = custody::request_key(request.provider_instance_id.as_deref(), &request.request_id);
+    let launch_custody = RequestCustody::acquire(&state_root, &key).map_err(custody_failure)?;
+    let state_path = launch_custody.state_path();
+    let journal_path = launch_custody.journal_path();
     let digest = sha256_hex(
         serde_json::to_vec(&json!({"params":request.params,"config":config,
         "host_env":request.host.env,"host_working_directory":request.host.working_directory,
@@ -479,11 +407,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         .unwrap()
         .as_slice(),
     );
-    if state_path.is_file() {
-        let state: State = serde_json::from_slice(
-            &crate::durable_fs::read_file_bounded(&state_path, 64 * 1024).map_err(io_failure)?,
-        )
-        .map_err(|_| failure("launch_state_invalid", "Invalid launch state"))?;
+    if let Some(state) = launch_custody.load_state().map_err(custody_failure)? {
         if state.digest != digest {
             return Err(ProviderFailure::conflict(
                 "",
@@ -492,8 +416,10 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
                 json!({}),
             ));
         }
-        if state.phase == "complete" {
-            replay_journal(&journal_path, &state, writer)?;
+        if state.is_complete() {
+            launch_custody
+                .replay(&state, writer)
+                .map_err(custody_failure)?;
             return Ok(state.exit_code.unwrap_or(1));
         }
         if let (Some(id), Some(incarnation)) = (state.actor_id, state.incarnation) {
@@ -540,20 +466,14 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
                 .as_bytes()
             )
         ));
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(io_failure)?;
-        file.try_lock_exclusive().map_err(|_| {
-            ProviderFailure::retryable_conflict(
+        let file = custody::try_lock_exclusive(&path).map_err(|error| match error {
+            CustodyError::Busy => ProviderFailure::retryable_conflict(
                 "",
                 "session_busy",
                 "This session already has an active turn",
                 json!({}),
-            )
+            ),
+            error => custody_failure(error),
         })?;
         Some(file)
     } else {
@@ -594,7 +514,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         "AGENT_BASH_AGENT_RUNNER_BIN".into(),
         config.agent_runner_bin.display().to_string(),
     );
-    let session_path = state_root.join(format!("{key}.session"));
+    let session_path = launch_custody.sibling("session");
     env.insert(
         "AGENT_RUNNER_CODEX_SESSION_FILE".into(),
         session_path.display().to_string(),
@@ -620,8 +540,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         publish_session(&session_path, id)?;
     }
     let args = native_args(&config, &plan, &env, session);
-    let mut gate =
-        native_process::GatedCommand::new(&config.codex_bin, &args).map_err(io_failure)?;
+    let mut gate = native_process::gated_command(&config.codex_bin, &args).map_err(io_failure)?;
     for key in [
         "AGENT_RUNNER_CODEX_INTERACTIVE",
         "AGENT_RUNNER_CODEX_SESSION_BINDING",
@@ -640,20 +559,14 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut state = State {
-        digest,
-        phase: "prepared".into(),
-        actor_id: None,
-        incarnation: None,
-        exit_code: None,
-        journal_sha256: None,
-        journal_len: None,
-    };
+    let mut state = LaunchState::prepared(digest);
     if let Err(error) = validate_admission(request) {
         std::fs::remove_file(&session_path).map_err(io_failure)?;
         return Err(error);
     }
-    write_state(&state_path, &state)?;
+    launch_custody
+        .write_state(&state)
+        .map_err(custody_failure)?;
     if let Err(error) = validate_admission(request) {
         std::fs::remove_file(&state_path).map_err(io_failure)?;
         std::fs::remove_file(&session_path).map_err(io_failure)?;
@@ -664,20 +577,13 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     let actor = native_process::actor_for_child(&child.0).map_err(io_failure)?;
     state.actor_id = Some(actor.process_group_id);
     state.incarnation = Some(actor.incarnation);
-    state.phase = "running".into();
-    write_state(&state_path, &state)?;
-    let journal = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&journal_path)
-        .map_err(io_failure)?;
+    state.phase = custody::PHASE_RUNNING.into();
+    launch_custody
+        .write_state(&state)
+        .map_err(custody_failure)?;
+    let journal = launch_custody.create_journal().map_err(io_failure)?;
     let mut stream = Stream {
-        writer,
-        journal,
-        request_id: &request.request_id,
-        seq: 0,
-        bytes: 0,
-        journal_sha256: Sha256::new(),
+        events: LaunchEventWriter::new(writer, journal, CONTRACT, &request.request_id),
         output: OutputSummary::default(),
     };
     let (send, receive) = mpsc::sync_channel(32);
@@ -917,13 +823,15 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
     }
     stream.event(json!({"kind":"exit", "status":terminal::process_status_json(&terminal_status),
         "terminal_signal":terminal::classify_with_failure(&terminal_status,now_unix_ms(),native_failure,terminal::host_supports_unavailable(&request.host)), "session":{"provider_session_id":thread_id}}))?;
-    stream.journal.sync_all().map_err(io_failure)?;
-    state.journal_sha256 = Some(format!("{:x}", stream.journal_sha256.clone().finalize()));
-    state.journal_len = Some(stream.bytes);
-    state.phase = "complete".into();
+    let receipt = stream.events.seal().map_err(io_failure)?;
+    state.journal_sha256 = Some(receipt.sha256);
+    state.journal_len = Some(receipt.len);
+    state.phase = custody::PHASE_COMPLETE.into();
     state.exit_code = Some(code);
     state.actor_id = None;
     state.incarnation = None;
-    write_state(&state_path, &state)?;
+    launch_custody
+        .write_state(&state)
+        .map_err(custody_failure)?;
     Ok(code)
 }

@@ -6,6 +6,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
+agent-provider-execution = { git = "https://github.com/nestharus/agent-provider-sdk.git", rev = "b07e3a3abf851c6fb307dd6ca102af951540c042" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

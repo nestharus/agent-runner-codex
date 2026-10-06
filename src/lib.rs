@@ -1,7 +1,7 @@
 pub mod account;
+pub(crate) use agent_provider_execution::durable_fs;
 pub mod discovery;
 pub mod dispatch;
-mod durable_fs;
 pub mod encoding;
 pub mod envelope;
 pub mod interactive;
