@@ -43,10 +43,13 @@ the same allowance.
 
 The carried `common.schema.json` earlier differed from the historical hash below:
 provider commit `268e81dacd1b8b9b50e980bb9a7bae38a9d80468` added the separately
-selected terminal-unavailability extension. Its current SHA-256 is
+selected terminal-unavailability extension. At that earlier provider revision its SHA-256 was
 `aed77a4ce27a3f4a5d4b8a5c0aa00e8928a3d47464736fde0dd1e50d88d0f30b`.
 That existing extension is not an AGE-347 observation change. All other schema
-files still match their listed historical hashes.
+files outside the resident alignment and local session extension still match
+their listed historical hashes. The current aligned common schema SHA-256 is
+`a6760352a585883708d0eb538c1dd2cd7572995b8288c440ba2635fa7f7b2866`;
+describe has the SDK advertisement widening recorded above.
 
 ## Historical snapshot SHA-256 identities
 
