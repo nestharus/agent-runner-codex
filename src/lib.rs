@@ -11,6 +11,7 @@ mod native_process;
 pub mod policy;
 pub mod quota;
 mod registration;
+pub mod resident;
 pub mod session;
 mod session_turn_pages;
 pub mod terminal;

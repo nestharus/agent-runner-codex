@@ -27,12 +27,29 @@ or a claim that the historical snapshot already allowed these totals. A paired
 consumer must align its executable result schema and native-I/O validator before
 accepting this observation extension. This work changes no other schema.
 
-The carried `common.schema.json` already differs from the historical hash below:
+## Resident-session alignment
+
+`describe.schema.json` and `common.schema.json` are now byte-identical to the
+`agent-provider-sdk` snapshot at commit
+`38acb566f985a77cd6a623257bfe7feb0302da62` (Agent Runner `5d025b82` plus the
+host-selected `resident_session_v1` capability and its selector, plus
+advertisement-only tolerance for future versions/capabilities). Relative to
+the previous carried copies this adds that capability, Runner's longer
+`launch_output_v1` description and the `provider_storage_contention` terminal
+kind. `contract/extensions/resident-session/v1.schema.json` is the SDK's
+extension schema at that commit. `session.schema.json` keeps the local AGE-347
+observation variant described above; the SDK carries Runner's later wording of
+the same allowance.
+
+The carried `common.schema.json` earlier differed from the historical hash below:
 provider commit `268e81dacd1b8b9b50e980bb9a7bae38a9d80468` added the separately
-selected terminal-unavailability extension. Its current SHA-256 is
+selected terminal-unavailability extension. At that earlier provider revision its SHA-256 was
 `aed77a4ce27a3f4a5d4b8a5c0aa00e8928a3d47464736fde0dd1e50d88d0f30b`.
 That existing extension is not an AGE-347 observation change. All other schema
-files still match their listed historical hashes.
+files outside the resident alignment and local session extension still match
+their listed historical hashes. The current aligned common schema SHA-256 is
+`a6760352a585883708d0eb538c1dd2cd7572995b8288c440ba2635fa7f7b2866`;
+describe has the SDK advertisement widening recorded above.
 
 ## Historical snapshot SHA-256 identities
 

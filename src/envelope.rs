@@ -1,6 +1,6 @@
 //! Declared roles: formatter, validator, mapper
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -21,7 +21,7 @@ pub const CATEGORY_INVALID_SETTINGS: &str = "invalid_settings";
 pub const CATEGORY_CONFLICT: &str = "conflict";
 pub const CATEGORY_FAILED: &str = "failed";
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestEnvelope {
     pub contract: String,
@@ -31,7 +31,7 @@ pub struct RequestEnvelope {
     pub params: Value,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostContext {
     pub app: String,
