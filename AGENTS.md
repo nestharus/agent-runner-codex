@@ -53,9 +53,11 @@ the task worktree and branch when complete.
 Current integration uses fixed-v1 validation and capability agreement. General
 supported-version selection and automatic refreshed Runner agreement after
 replacement remain unfinished; do not advertise a second wire version before
-the host can select a common supported version. The shared lifecycle foundation
-and cross-build replay/update qualification are separate unfinished work. These
-rules state requirements, not a claim that those mechanisms are implemented.
+the host can select a common supported version. Launch plugs Codex behavior
+into the SDK's shared one-shot lifecycle; keep generic launch ordering there
+rather than reimplementing it here. Cross-build replay/update qualification is
+separate unfinished work. These rules state requirements, not a claim that
+those mechanisms are implemented.
 
 ## Tests
 
