@@ -1,10 +1,7 @@
-//! Codex identity for the shared native effect gate and process-group custody.
+//! Codex identity for the shared native effect gate. Process-group custody and
+//! recovery run inside the SDK launch lifecycle.
 
-pub(crate) use agent_provider_execution::process::{
-    actor_for_child, terminate_process_group_actor, terminate_process_group_child, GatedCommand,
-    ProcessGroupActor,
-};
-use agent_provider_execution::process::{locate_provider_executable, EffectGate};
+use agent_provider_execution::process::{locate_provider_executable, EffectGate, GatedCommand};
 use std::ffi::OsStr;
 use std::io;
 

@@ -1,6 +1,8 @@
-//! Stable `codex exec --json` adapter over the SDK's native effect gate,
-//! process-group custody, request custody, and launch-event framing. Requests
-//! are journaled before output is published.
+//! Stable `codex exec --json` adapter plugged into the SDK's shared one-shot
+//! launch lifecycle. The SDK owns custody, replay, reconciliation, admission,
+//! the effect gate, draining, cancellation and completion; this module supplies
+//! the Codex request digest, session ownership, argv/environment, native event
+//! translation and terminal classification.
 use crate::{
     account,
     encoding::{now_unix_ms, sha256_hex},
@@ -10,19 +12,19 @@ use crate::{
     terminal,
 };
 use agent_provider_execution::{
-    custody::{self, CustodyError, LaunchState, RequestCustody},
-    framing::{FramingError, LaunchEventWriter},
+    custody::{self, CustodyError, RequestCustody},
+    framing::FramingError,
+    lifecycle::{
+        self, Channel, EventSink, LaunchAdapter, LaunchSpec, LifecycleError, LifecycleTiming,
+        NativeCommand, NativeOutcome, OutputFraming, Preparation, Terminal,
+    },
 };
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::OpenOptions,
-    io::{BufRead, BufReader, Read, Write},
+    io::Write,
     path::{Path, PathBuf},
-    process::{Child, Stdio},
-    sync::mpsc,
-    time::{Duration, Instant},
 };
 
 const MAX_LINE: u64 = 4 * 1024 * 1024;
@@ -73,87 +75,13 @@ fn output_requested(request: &RequestEnvelope) -> Result<bool, ProviderFailure> 
     Ok(true)
 }
 
-#[derive(Default)]
-struct ChannelSummary {
-    bytes: u64,
-    sha256: Sha256,
-}
-impl ChannelSummary {
-    fn accept(&mut self, bytes: &[u8]) -> Result<(), ProviderFailure> {
-        self.bytes = self.bytes.checked_add(bytes.len() as u64).ok_or_else(|| {
-            failure(
-                "launch_output_accounting",
-                "Launch output byte count overflowed",
-            )
-        })?;
-        self.sha256.update(bytes);
-        Ok(())
-    }
-    fn value(&self) -> Value {
-        json!({"bytes":self.bytes,"sha256":format!("{:x}",self.sha256.clone().finalize())})
-    }
-}
-
-#[derive(Default)]
-struct OutputSummary {
-    stdout: ChannelSummary,
-    stderr: ChannelSummary,
-    data_event_count: u64,
-}
-impl OutputSummary {
-    fn accept(&mut self, kind: &str, bytes: &[u8]) -> Result<(), ProviderFailure> {
-        self.data_event_count = self.data_event_count.checked_add(1).ok_or_else(|| {
-            failure(
-                "launch_output_accounting",
-                "Launch output event count overflowed",
-            )
-        })?;
-        if kind == "stdout" {
-            self.stdout.accept(bytes)
-        } else {
-            self.stderr.accept(bytes)
-        }
-    }
-    fn value(&self) -> Value {
-        json!({"protocol":LAUNCH_OUTPUT_PROTOCOL,"stdout":self.stdout.value(),"stderr":self.stderr.value(),"data_event_count":self.data_event_count})
-    }
-}
-
-const STREAM_CLOSE_GRACE: Duration = Duration::from_secs(2);
-
 fn install_cancellation_handlers() {
     #[cfg(unix)]
     agent_provider_execution::cancellation::install_termination_handlers();
 }
 
-fn cancel_requested() -> bool {
-    #[cfg(unix)]
-    return agent_provider_execution::cancellation::termination_requested();
-    #[cfg(not(unix))]
-    false
-}
-
-fn deadline_elapsed(request: &RequestEnvelope) -> bool {
-    request
-        .host
-        .deadline_unix_ms
-        .is_some_and(|deadline| now_unix_ms() >= deadline)
-}
-
 pub(crate) fn validate_admission(request: &RequestEnvelope) -> Result<(), ProviderFailure> {
-    if cancel_requested() {
-        return Err(failure(
-            "launch_cancelled",
-            "Launch was cancelled before native admission",
-        ));
-    }
-    if deadline_elapsed(request) {
-        return Err(failure(
-            "launch_deadline",
-            "Host launch deadline elapsed before native admission",
-        ));
-    }
-    Ok(())
+    lifecycle::check_admission(request.host.deadline_unix_ms).map_err(ProviderFailure::from)
 }
 
 pub(crate) fn valid_thread_id(id: &str) -> bool {
@@ -173,15 +101,6 @@ fn publish_session(path: &Path, id: &str) -> Result<(), ProviderFailure> {
     file.as_file().sync_all().map_err(io_failure)?;
     file.persist(path).map_err(|e| io_failure(e.error))?;
     Ok(())
-}
-
-struct ChildGuard(Child, bool);
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if self.1 {
-            native_process::terminate_process_group_child(&mut self.0);
-        }
-    }
 }
 
 fn failure(code: &'static str, message: impl Into<String>) -> ProviderFailure {
@@ -224,20 +143,58 @@ fn framing_failure(error: FramingError) -> ProviderFailure {
     }
 }
 
-struct Stream<'a, W: Write> {
-    events: LaunchEventWriter<'a, W>,
-    output: OutputSummary,
-}
-impl<W: Write> Stream<'_, W> {
-    fn event(&mut self, event: Value) -> Result<(), ProviderFailure> {
-        self.events.event(event).map_err(framing_failure)
-    }
-    fn marker(&mut self, name: &str, value: Value) -> Result<(), ProviderFailure> {
-        self.events.marker(name, value).map_err(framing_failure)
-    }
-    fn bytes(&mut self, kind: &str, bytes: &[u8]) -> Result<(), ProviderFailure> {
-        self.events.data(kind, bytes).map_err(framing_failure)?;
-        self.output.accept(kind, bytes)
+/// Codex failure codes and messages for the shared lifecycle's outcomes.
+impl From<LifecycleError> for ProviderFailure {
+    fn from(error: LifecycleError) -> Self {
+        match error {
+            LifecycleError::Busy => custody_failure(CustodyError::Busy),
+            LifecycleError::RequestChanged => ProviderFailure::conflict(
+                "",
+                "request_changed",
+                "Request ID was already used with different inputs",
+                json!({}),
+            ),
+            LifecycleError::ReconciliationRequired => ProviderFailure::conflict("", "launch_reconciliation_required", "Prior invocation ended before terminal custody; inspect the Codex session before issuing a new request", json!({})),
+            LifecycleError::Cancelled => failure(
+                "launch_cancelled",
+                "Launch was cancelled before native admission",
+            ),
+            LifecycleError::DeadlineElapsed => failure(
+                "launch_deadline",
+                "Host launch deadline elapsed before native admission",
+            ),
+            LifecycleError::Custody(error) => custody_failure(error),
+            LifecycleError::Framing(error) => framing_failure(error),
+            LifecycleError::Io(error) => io_failure(error),
+            LifecycleError::NativeStreamInvalid => failure(
+                "native_stream_invalid",
+                "Codex stream line exceeded 4 MiB or could not be read",
+            ),
+            LifecycleError::NativeStreamsClosed => failure(
+                "native_streams_closed",
+                "Codex closed its streams without exiting; native process group terminated",
+            ),
+            LifecycleError::NativeDrainIncomplete => failure(
+                "native_stream_drain_incomplete",
+                "Native output pipes remained open after process-group termination",
+            ),
+            LifecycleError::InputStalled => failure(
+                "stdin_failed",
+                "Codex input pipe remained open after native termination",
+            ),
+            LifecycleError::InputWriterFailed => failure("stdin_failed", "Codex input writer failed"),
+            LifecycleError::InputIncomplete => failure(
+                "stdin_failed",
+                "Could not deliver the complete prompt to Codex",
+            ),
+            LifecycleError::WaitFailed => {
+                failure("native_wait_failed", "Could not reap the native process")
+            }
+            LifecycleError::AccountingOverflow => failure(
+                "launch_output_accounting",
+                "Launch output byte count overflowed",
+            ),
+        }
     }
 }
 
@@ -396,442 +353,333 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         .unwrap_or_else(|| user.join(".local/share/oulipoly-agent-runner"));
     let state_root = root.join("provider-state/codex/launch");
     crate::durable_fs::create_private_directories(&state_root).map_err(io_failure)?;
-    let key = custody::request_key(request.provider_instance_id.as_deref(), &request.request_id);
-    let launch_custody = RequestCustody::acquire(&state_root, &key).map_err(custody_failure)?;
-    let state_path = launch_custody.state_path();
-    let journal_path = launch_custody.journal_path();
-    let digest = sha256_hex(
-        serde_json::to_vec(&json!({"params":request.params,"config":config,
-        "host_env":request.host.env,"host_working_directory":request.host.working_directory,
-        "account_home":account::home(&request.host, &plan.settings_id)?}))
-        .unwrap()
-        .as_slice(),
-    );
-    if let Some(state) = launch_custody.load_state().map_err(custody_failure)? {
-        if state.digest != digest {
-            return Err(ProviderFailure::conflict(
-                "",
-                "request_changed",
-                "Request ID was already used with different inputs",
-                json!({}),
-            ));
-        }
-        if state.is_complete() {
-            launch_custody
-                .replay(&state, writer)
-                .map_err(custody_failure)?;
-            return Ok(state.exit_code.unwrap_or(1));
-        }
-        if let (Some(id), Some(incarnation)) = (state.actor_id, state.incarnation) {
-            native_process::terminate_process_group_actor(&native_process::ProcessGroupActor {
-                process_group_id: id,
-                incarnation,
-            })
-            .map_err(io_failure)?;
-        }
-        return Err(ProviderFailure::conflict("", "launch_reconciliation_required", "Prior invocation ended before terminal custody; inspect the Codex session before issuing a new request", json!({})));
+    let spec = LaunchSpec {
+        contract: CONTRACT,
+        request_id: &request.request_id,
+        provider_instance_id: request.provider_instance_id.as_deref(),
+        deadline_unix_ms: request.host.deadline_unix_ms,
+        state_root: &state_root,
+        timing: LifecycleTiming::default(),
+    };
+    let mut adapter = CodexLaunch {
+        request,
+        plan,
+        config,
+        working_directory,
+        session,
+        output_requested,
+        state_root: &state_root,
+        session_path: None,
+        session_lock: None,
+        thread_id: session.map(str::to_string),
+        completed: false,
+        assistant_response: false,
+        failed: false,
+        native_failure: None,
+    };
+    lifecycle::run_launch(&spec, &mut adapter, writer)
+}
+
+/// Codex plug points for the shared launch lifecycle: request digest, account
+/// session ownership and argv/environment preparation, `codex exec --json`
+/// translation, and terminal classification.
+struct CodexLaunch<'a> {
+    request: &'a RequestEnvelope,
+    plan: Plan,
+    config: RuntimeConfig,
+    working_directory: &'a str,
+    session: Option<&'a str>,
+    output_requested: bool,
+    state_root: &'a Path,
+    session_path: Option<PathBuf>,
+    session_lock: Option<std::fs::File>,
+    thread_id: Option<String>,
+    completed: bool,
+    assistant_response: bool,
+    failed: bool,
+    native_failure: Option<terminal::NativeFailure>,
+}
+
+impl LaunchAdapter for CodexLaunch<'_> {
+    type Failure = ProviderFailure;
+
+    fn request_digest(&mut self) -> Result<String, ProviderFailure> {
+        let request = self.request;
+        Ok(sha256_hex(
+            serde_json::to_vec(&json!({"params":request.params,"config":self.config,
+            "host_env":request.host.env,"host_working_directory":request.host.working_directory,
+            "account_home":account::home(&request.host, &self.plan.settings_id)?}))
+            .unwrap()
+            .as_slice(),
+        ))
     }
-    validate_admission(request)?;
-    config.validate()?;
-    if !Path::new(working_directory).is_dir() {
-        return Err(failure(
-            "invalid_working_directory",
-            "working_directory must be an existing directory",
-        ));
-    }
-    if let Some(id) = session {
-        // Resolve within the selected account before allowing native resume.
-        let mut locate = request.clone();
-        locate.params = json!({"settings_id":plan.settings_id, "session_id":id});
-        let located = crate::session::handle("session.locate_transcript", &locate)?;
-        if !located
-            .get("located")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+
+    fn prepare(&mut self, launch_custody: &RequestCustody) -> Result<Preparation, ProviderFailure> {
+        let request = self.request;
+        let plan = &self.plan;
+        let config = &self.config;
+        let session = self.session;
+        config.validate()?;
+        if !Path::new(self.working_directory).is_dir() {
             return Err(failure(
-                "session_not_found",
-                "The selected Codex account does not own this session",
+                "invalid_working_directory",
+                "working_directory must be an existing directory",
             ));
         }
-    }
-    let _session_lock = if let Some(id) = session {
-        let path = state_root.join(format!(
-            "session-{}.lock",
-            sha256_hex(
-                format!(
-                    "{}:{id}",
-                    account::home(&request.host, &plan.settings_id)?.display()
+        if let Some(id) = session {
+            // Resolve within the selected account before allowing native resume.
+            let mut locate = request.clone();
+            locate.params = json!({"settings_id":plan.settings_id, "session_id":id});
+            let located = crate::session::handle("session.locate_transcript", &locate)?;
+            if !located
+                .get("located")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(failure(
+                    "session_not_found",
+                    "The selected Codex account does not own this session",
+                ));
+            }
+        }
+        if let Some(id) = session {
+            let path = self.state_root.join(format!(
+                "session-{}.lock",
+                sha256_hex(
+                    format!(
+                        "{}:{id}",
+                        account::home(&request.host, &plan.settings_id)?.display()
+                    )
+                    .as_bytes()
                 )
-                .as_bytes()
-            )
-        ));
-        let file = custody::try_lock_exclusive(&path).map_err(|error| match error {
-            CustodyError::Busy => ProviderFailure::retryable_conflict(
-                "",
-                "session_busy",
-                "This session already has an active turn",
-                json!({}),
-            ),
-            error => custody_failure(error),
-        })?;
-        Some(file)
-    } else {
-        None
-    };
-    // Unrepresentable inherited values still reach the child through Command's
-    // native environment inheritance; only explicit Unicode overrides are added.
-    let mut env: BTreeMap<String, String> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .collect();
-    if let Some(host_env) = &request.host.env {
-        env.extend(host_env.clone());
-    }
-    // Only the explicit policy-admitted launch environment may carry account
-    // instructions; parent process/host environments are stale for this turn.
-    env.remove("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS");
-    env.extend(plan.env.clone());
-    if env
-        .get("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS")
-        .is_some_and(|value| value.trim().is_empty())
-    {
+            ));
+            let file = custody::try_lock_exclusive(&path).map_err(|error| match error {
+                CustodyError::Busy => ProviderFailure::retryable_conflict(
+                    "",
+                    "session_busy",
+                    "This session already has an active turn",
+                    json!({}),
+                ),
+                error => custody_failure(error),
+            })?;
+            self.session_lock = Some(file);
+        }
+        // Unrepresentable inherited values still reach the child through Command's
+        // native environment inheritance; only explicit Unicode overrides are added.
+        let mut env: BTreeMap<String, String> = std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+            .collect();
+        if let Some(host_env) = &request.host.env {
+            env.extend(host_env.clone());
+        }
+        // Only the explicit policy-admitted launch environment may carry account
+        // instructions; parent process/host environments are stale for this turn.
         env.remove("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS");
-    }
-    // A headless child can inherit these from a managed TUI parent. Its MCP
-    // transport must use the private launch receipt and headless lease policy.
-    for key in [
-        "AGENT_RUNNER_CODEX_INTERACTIVE",
-        "AGENT_RUNNER_CODEX_SESSION_BINDING",
-        "AGENT_RUNNER_CODEX_REGISTRATION_CWD",
-    ] {
-        env.remove(key);
-    }
-    env.insert(
-        "AGENT_BASH_BIN".into(),
-        config.agent_bash_bin.display().to_string(),
-    );
-    env.insert(
-        "AGENT_BASH_AGENT_RUNNER_BIN".into(),
-        config.agent_runner_bin.display().to_string(),
-    );
-    let session_path = launch_custody.sibling("session");
-    env.insert(
-        "AGENT_RUNNER_CODEX_SESSION_FILE".into(),
-        session_path.display().to_string(),
-    );
-    env.remove("AGENT_RUNNER_CODEX_SESSION_ID");
-    if let Some(id) = session {
-        env.insert("AGENT_RUNNER_CODEX_SESSION_ID".into(), id.into());
-    }
-    // This file is private and fresh for this request. MCP waits for native identity.
-    let mut session_file_options = OpenOptions::new();
-    session_file_options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        session_file_options.mode(0o600);
-    }
-    session_file_options
-        .open(&session_path)
-        .map_err(io_failure)?
-        .sync_all()
-        .map_err(io_failure)?;
-    if let Some(id) = session {
-        publish_session(&session_path, id)?;
-    }
-    let args = native_args(&config, &plan, &env, session);
-    let mut gate = native_process::gated_command(&config.codex_bin, &args).map_err(io_failure)?;
-    for key in [
-        "AGENT_RUNNER_CODEX_INTERACTIVE",
-        "AGENT_RUNNER_CODEX_SESSION_BINDING",
-        "AGENT_RUNNER_CODEX_REGISTRATION_CWD",
-        "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS",
-    ] {
-        gate.command_mut().env_remove(key);
-    }
-    if session.is_none() {
-        gate.command_mut()
-            .env_remove("AGENT_RUNNER_CODEX_SESSION_ID");
-    }
-    gate.command_mut()
-        .envs(&env)
-        .current_dir(working_directory)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut state = LaunchState::prepared(digest);
-    if let Err(error) = validate_admission(request) {
-        std::fs::remove_file(&session_path).map_err(io_failure)?;
-        return Err(error);
-    }
-    launch_custody
-        .write_state(&state)
-        .map_err(custody_failure)?;
-    if let Err(error) = validate_admission(request) {
-        std::fs::remove_file(&state_path).map_err(io_failure)?;
-        std::fs::remove_file(&session_path).map_err(io_failure)?;
-        return Err(error);
-    }
-    let (child, release) = gate.spawn().map_err(io_failure)?;
-    let mut child = ChildGuard(child, true);
-    let actor = native_process::actor_for_child(&child.0).map_err(io_failure)?;
-    state.actor_id = Some(actor.process_group_id);
-    state.incarnation = Some(actor.incarnation);
-    state.phase = custody::PHASE_RUNNING.into();
-    launch_custody
-        .write_state(&state)
-        .map_err(custody_failure)?;
-    let journal = launch_custody.create_journal().map_err(io_failure)?;
-    let mut stream = Stream {
-        events: LaunchEventWriter::new(writer, journal, CONTRACT, &request.request_id),
-        output: OutputSummary::default(),
-    };
-    let (send, receive) = mpsc::sync_channel(32);
-    for (kind, reader) in [
-        (
-            "stdout",
-            Box::new(child.0.stdout.take().unwrap()) as Box<dyn Read + Send>,
-        ),
-        (
-            "stderr",
-            Box::new(child.0.stderr.take().unwrap()) as Box<dyn Read + Send>,
-        ),
-    ] {
-        let send = send.clone();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(reader);
-            loop {
-                let mut bytes = Vec::new();
-                match reader
-                    .by_ref()
-                    .take(MAX_LINE + 1)
-                    .read_until(b'\n', &mut bytes)
-                {
-                    Ok(0) => break,
-                    Ok(_) if bytes.len() as u64 <= MAX_LINE => {
-                        if send.send((kind, Ok(bytes))).is_err() {
-                            return;
-                        }
-                    }
-                    _ => {
-                        let _ = send.send((
-                            kind,
-                            Err("Codex stream line exceeded 4 MiB or could not be read"),
-                        ));
-                        break;
-                    }
-                }
-            }
-        });
-    }
-    drop(send);
-    if let Err(error) = validate_admission(request) {
-        drop(release);
-        native_process::terminate_process_group_child(&mut child.0);
-        child.1 = false;
-        std::fs::remove_file(&journal_path).map_err(io_failure)?;
-        std::fs::remove_file(&state_path).map_err(io_failure)?;
-        std::fs::remove_file(&session_path).map_err(io_failure)?;
-        return Err(error);
-    }
-    release.release().map_err(io_failure)?;
-    let mut stdin = child.0.stdin.take().unwrap();
-    let prompt = plan.prompt.clone();
-    let input = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
-    stream.marker(
-        "codex.route",
-        json!({"account":plan.settings_id,"model":plan.model,"effort":plan.effort}),
-    )?;
-    let mut thread_id = session.map(str::to_string);
-    let mut completed = false;
-    let mut assistant_response = false;
-    let mut failed = false;
-    let mut native_failure = None;
-    let mut native_status = None;
-    let mut last_heartbeat = Instant::now();
-    let mut last_native_event = Instant::now();
-    let mut exited_at = None;
-    let mut streams_closed_at = None;
-    let mut forced_status = None;
-    loop {
-        if forced_status.is_none() && (cancel_requested() || deadline_elapsed(request)) {
-            forced_status = Some(terminal::ProcessStatus::Cancelled);
-            native_status = native_process::terminate_process_group_child(&mut child.0);
-            child.1 = false;
-            exited_at = Some(Instant::now());
-        }
-        match receive.recv_timeout(Duration::from_millis(100)) {
-            Ok((kind, result)) => {
-                last_native_event = Instant::now();
-                let bytes = result.map_err(|message| failure("native_stream_invalid", message))?;
-                if kind == "stderr" {
-                    stream.bytes(kind, &bytes)?;
-                } else {
-                    let event: Value = serde_json::from_slice(&bytes).map_err(|_| {
-                        failure("native_json_invalid", "Codex emitted invalid JSON")
-                    })?;
-                    match event.get("type").and_then(Value::as_str).unwrap_or("") {
-                        "thread.started" => {
-                            if let Some(id) = event.get("thread_id").and_then(Value::as_str) {
-                                if !valid_thread_id(id) {
-                                    return Err(failure(
-                                        "invalid_thread_identity",
-                                        "Codex returned an invalid thread ID",
-                                    ));
-                                }
-                                if thread_id.as_deref().is_some_and(|known| known != id) {
-                                    return Err(failure(
-                                        "thread_identity_changed",
-                                        "Codex returned a different thread ID",
-                                    ));
-                                }
-                                publish_session(&session_path, id)?;
-                                thread_id = Some(id.into());
-                                stream.marker(
-                                    "oulipoly.provider_session",
-                                    json!({"provider_session_id":id,"source":"codex.exec.json"}),
-                                )?;
-                            }
-                        }
-                        "turn.started" => {
-                            if let Some(id) = &thread_id {
-                                stream.marker("oulipoly.submitted_user_turn", json!({"provider_session_id":id,"prompt_sha256":sha256_hex(plan.prompt.as_bytes()),"source":"codex.exec.json"}))?;
-                            }
-                        }
-                        "item.completed" => {
-                            if event.pointer("/item/type").and_then(Value::as_str)
-                                == Some("agent_message")
-                            {
-                                if let Some(text) =
-                                    event.pointer("/item/text").and_then(Value::as_str)
-                                {
-                                    assistant_response |= !text.trim().is_empty();
-                                    stream.bytes("stdout", format!("{text}\n").as_bytes())?;
-                                }
-                            }
-                        }
-                        "turn.completed" => {
-                            completed = true;
-                        }
-                        "turn.failed" => {
-                            failed = true;
-                            native_failure = terminal::NativeFailure::from_event(&event);
-                            stream.bytes("stderr", &bytes)?;
-                        }
-                        "error" => {
-                            native_failure = terminal::NativeFailure::from_event(&event);
-                            stream.bytes("stderr", &bytes)?;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                streams_closed_at.get_or_insert_with(Instant::now);
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        if native_status.is_none() {
-            native_status = child.0.try_wait().map_err(io_failure)?;
-            if native_status.is_some() {
-                // Once the native leader exits, stop descendants but continue
-                // draining buffered output; a busy drain has no lifetime cap.
-                if child.1 {
-                    native_process::terminate_process_group_child(&mut child.0);
-                    child.1 = false;
-                }
-                exited_at = Some(Instant::now());
-            }
-        }
-        if streams_closed_at.is_some() && native_status.is_some() {
-            break;
-        }
-        if streams_closed_at.is_some_and(|time| time.elapsed() >= STREAM_CLOSE_GRACE) {
-            return Err(failure(
-                "native_streams_closed",
-                "Codex closed its streams without exiting; native process group terminated",
-            ));
-        }
-        if exited_at.is_some_and(|time| time.elapsed() > STREAM_CLOSE_GRACE)
-            && last_native_event.elapsed() > STREAM_CLOSE_GRACE
+        env.extend(plan.env.clone());
+        if env
+            .get("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS")
+            .is_some_and(|value| value.trim().is_empty())
         {
-            return Err(failure(
-                "native_stream_drain_incomplete",
-                "Native output pipes remained open after process-group termination",
-            ));
+            env.remove("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS");
         }
-        if last_heartbeat.elapsed() >= Duration::from_secs(1) {
-            stream.event(json!({"kind":"heartbeat"}))?;
-            last_heartbeat = Instant::now();
+        // A headless child can inherit these from a managed TUI parent. Its MCP
+        // transport must use the private launch receipt and headless lease policy.
+        for key in [
+            "AGENT_RUNNER_CODEX_INTERACTIVE",
+            "AGENT_RUNNER_CODEX_SESSION_BINDING",
+            "AGENT_RUNNER_CODEX_REGISTRATION_CWD",
+        ] {
+            env.remove(key);
         }
-    }
-    let status = match native_status {
-        Some(status) => status,
-        None => native_process::terminate_process_group_child(&mut child.0)
-            .ok_or_else(|| failure("native_wait_failed", "Could not reap the native process"))?,
-    };
-    // Finish process-group custody even if a native child inherited stream fds.
-    if child.1 {
-        native_process::terminate_process_group_child(&mut child.0);
-        child.1 = false;
-    }
-    let input_done = Instant::now();
-    while !input.is_finished() && input_done.elapsed() < STREAM_CLOSE_GRACE {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    if !input.is_finished() {
-        return Err(failure(
-            "stdin_failed",
-            "Codex input pipe remained open after native termination",
-        ));
-    }
-    if input
-        .join()
-        .map_err(|_| failure("stdin_failed", "Codex input writer failed"))?
-        .is_err()
-        && status.success()
-        && forced_status.is_none()
-    {
-        return Err(failure(
-            "stdin_failed",
-            "Could not deliver the complete prompt to Codex",
-        ));
-    }
-    let code = status.code().unwrap_or(1);
-    let code = if code == 0 && (!completed || failed) {
-        1
-    } else {
-        code
-    };
-    let terminal_status = forced_status.unwrap_or_else(|| {
+        env.insert(
+            "AGENT_BASH_BIN".into(),
+            config.agent_bash_bin.display().to_string(),
+        );
+        env.insert(
+            "AGENT_BASH_AGENT_RUNNER_BIN".into(),
+            config.agent_runner_bin.display().to_string(),
+        );
+        let session_path = launch_custody.sibling("session");
+        env.insert(
+            "AGENT_RUNNER_CODEX_SESSION_FILE".into(),
+            session_path.display().to_string(),
+        );
+        env.remove("AGENT_RUNNER_CODEX_SESSION_ID");
+        if let Some(id) = session {
+            env.insert("AGENT_RUNNER_CODEX_SESSION_ID".into(), id.into());
+        }
+        // This file is private and fresh for this request. MCP waits for native identity.
+        let mut session_file_options = OpenOptions::new();
+        session_file_options.create_new(true).write(true);
         #[cfg(unix)]
         {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(signal) = status.signal() {
-                return terminal::ProcessStatus::SignalTerminated { signal };
-            }
+            use std::os::unix::fs::OpenOptionsExt;
+            session_file_options.mode(0o600);
         }
-        terminal::ProcessStatus::Exited { code }
-    });
-    let code = terminal::exit_code_for_status(&terminal_status);
-    if completed && !failed && assistant_response && code == 0 {
-        stream.marker("oulipoly.produced_assistant_response", json!(true))?;
+        session_file_options
+            .open(&session_path)
+            .map_err(io_failure)?
+            .sync_all()
+            .map_err(io_failure)?;
+        self.session_path = Some(session_path.clone());
+        if let Some(id) = session {
+            publish_session(&session_path, id)?;
+        }
+        let args = native_args(config, plan, &env, session);
+        let mut gate =
+            native_process::gated_command(&config.codex_bin, &args).map_err(io_failure)?;
+        for key in [
+            "AGENT_RUNNER_CODEX_INTERACTIVE",
+            "AGENT_RUNNER_CODEX_SESSION_BINDING",
+            "AGENT_RUNNER_CODEX_REGISTRATION_CWD",
+            "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS",
+        ] {
+            gate.command_mut().env_remove(key);
+        }
+        if session.is_none() {
+            gate.command_mut()
+                .env_remove("AGENT_RUNNER_CODEX_SESSION_ID");
+        }
+        gate.command_mut()
+            .envs(&env)
+            .current_dir(self.working_directory);
+        Ok(Preparation::Native(NativeCommand {
+            command: gate,
+            stdin: Some(plan.prompt.clone().into_bytes()),
+            framing: OutputFraming::Lines {
+                max_bytes: MAX_LINE,
+            },
+        }))
     }
-    if output_requested {
-        stream.marker(LAUNCH_OUTPUT_COMPLETE_MARKER, stream.output.value())?;
+
+    fn discard(&mut self, _custody: &RequestCustody) -> Result<(), ProviderFailure> {
+        if let Some(path) = self.session_path.take() {
+            std::fs::remove_file(path).map_err(io_failure)?;
+        }
+        Ok(())
     }
-    stream.event(json!({"kind":"exit", "status":terminal::process_status_json(&terminal_status),
-        "terminal_signal":terminal::classify_with_failure(&terminal_status,now_unix_ms(),native_failure,terminal::host_supports_unavailable(&request.host)), "session":{"provider_session_id":thread_id}}))?;
-    let receipt = stream.events.seal().map_err(io_failure)?;
-    state.journal_sha256 = Some(receipt.sha256);
-    state.journal_len = Some(receipt.len);
-    state.phase = custody::PHASE_COMPLETE.into();
-    state.exit_code = Some(code);
-    state.actor_id = None;
-    state.incarnation = None;
-    launch_custody
-        .write_state(&state)
-        .map_err(custody_failure)?;
-    Ok(code)
+
+    fn started<W: Write>(&mut self, events: &mut EventSink<'_, W>) -> Result<(), ProviderFailure> {
+        let plan = &self.plan;
+        events.marker(
+            "codex.route",
+            json!({"account":plan.settings_id,"model":plan.model,"effort":plan.effort}),
+        )?;
+        Ok(())
+    }
+
+    fn output<W: Write>(
+        &mut self,
+        channel: Channel,
+        bytes: Vec<u8>,
+        events: &mut EventSink<'_, W>,
+    ) -> Result<(), ProviderFailure> {
+        if channel == Channel::Stderr {
+            events.data(Channel::Stderr, &bytes)?;
+            return Ok(());
+        }
+        let event: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| failure("native_json_invalid", "Codex emitted invalid JSON"))?;
+        match event.get("type").and_then(Value::as_str).unwrap_or("") {
+            "thread.started" => {
+                if let Some(id) = event.get("thread_id").and_then(Value::as_str) {
+                    if !valid_thread_id(id) {
+                        return Err(failure(
+                            "invalid_thread_identity",
+                            "Codex returned an invalid thread ID",
+                        ));
+                    }
+                    if self.thread_id.as_deref().is_some_and(|known| known != id) {
+                        return Err(failure(
+                            "thread_identity_changed",
+                            "Codex returned a different thread ID",
+                        ));
+                    }
+                    publish_session(self.session_path.as_ref().unwrap(), id)?;
+                    self.thread_id = Some(id.into());
+                    events.marker(
+                        "oulipoly.provider_session",
+                        json!({"provider_session_id":id,"source":"codex.exec.json"}),
+                    )?;
+                }
+            }
+            "turn.started" => {
+                if let Some(id) = &self.thread_id {
+                    events.marker("oulipoly.submitted_user_turn", json!({"provider_session_id":id,"prompt_sha256":sha256_hex(self.plan.prompt.as_bytes()),"source":"codex.exec.json"}))?;
+                }
+            }
+            "item.completed" => {
+                if event.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") {
+                    if let Some(text) = event.pointer("/item/text").and_then(Value::as_str) {
+                        self.assistant_response |= !text.trim().is_empty();
+                        events.data(Channel::Stdout, format!("{text}\n").as_bytes())?;
+                    }
+                }
+            }
+            "turn.completed" => {
+                self.completed = true;
+            }
+            "turn.failed" => {
+                self.failed = true;
+                self.native_failure = terminal::NativeFailure::from_event(&event);
+                events.data(Channel::Stderr, &bytes)?;
+            }
+            "error" => {
+                self.native_failure = terminal::NativeFailure::from_event(&event);
+                events.data(Channel::Stderr, &bytes)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn finish<W: Write>(
+        &mut self,
+        outcome: NativeOutcome,
+        events: &mut EventSink<'_, W>,
+    ) -> Result<Terminal, ProviderFailure> {
+        let status = outcome.status;
+        let code = status.code().unwrap_or(1);
+        let code = if code == 0 && (!self.completed || self.failed) {
+            1
+        } else {
+            code
+        };
+        // Host cancellation and the host deadline both end the turn as cancelled.
+        let terminal_status = match outcome.stopped {
+            Some(_) => terminal::ProcessStatus::Cancelled,
+            None => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    match status.signal() {
+                        Some(signal) => terminal::ProcessStatus::SignalTerminated { signal },
+                        None => terminal::ProcessStatus::Exited { code },
+                    }
+                }
+                #[cfg(not(unix))]
+                terminal::ProcessStatus::Exited { code }
+            }
+        };
+        let code = terminal::exit_code_for_status(&terminal_status);
+        if self.completed && !self.failed && self.assistant_response && code == 0 {
+            events.marker("oulipoly.produced_assistant_response", json!(true))?;
+        }
+        if self.output_requested {
+            let mut summary = events.accounting().to_json();
+            summary["protocol"] = json!(LAUNCH_OUTPUT_PROTOCOL);
+            events.marker(LAUNCH_OUTPUT_COMPLETE_MARKER, summary)?;
+        }
+        Ok(Terminal {
+            status: terminal::process_status_json(&terminal_status),
+            terminal_signal: terminal::classify_with_failure(
+                &terminal_status,
+                now_unix_ms(),
+                self.native_failure.take(),
+                terminal::host_supports_unavailable(&self.request.host),
+            ),
+            session: Some(json!({"provider_session_id":self.thread_id})),
+            exit_code: code,
+        })
+    }
 }

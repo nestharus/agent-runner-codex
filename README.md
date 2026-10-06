@@ -216,15 +216,17 @@ event. Incomplete requests retain their journal and require reconciliation;
 they do not claim a completed output receipt or silently execute again. A failed
 delivery of an already-completed replay leaves its durable receipt unchanged.
 
-The effect gate, process-group custody, bounded CLI output delivery, request
-locks, durable launch state, journal replay, launch-event framing, signal
-recording, and durable filesystem and encoding helpers come from the
-`agent-provider-execution` crate in
+Launch runs through the shared one-shot lifecycle (`lifecycle::run_launch`) of
+the `agent-provider-execution` crate in
 [agent-provider-sdk](https://github.com/nestharus/agent-provider-sdk), consumed
-without a manifest source-revision constraint. This adapter supplies its gate
-argument and descriptor variable, state root, request digest inputs, failure
-codes, native argv, environment, and Codex event translation. The on-disk
-launch-state layout and field names are unchanged.
+without a manifest source-revision constraint. The SDK owns request custody,
+replay, reconciliation, admission, the effect gate, process-group custody,
+draining, heartbeats, cancellation/deadline handling, the exit event and the
+completion receipt; the CLI wraps launch output in its bounded delivery writer.
+This adapter supplies its gate argument and descriptor variable, state root,
+request digest inputs, account session ownership and lock, native argv and
+environment, `codex exec --json` translation, terminal classification and
+failure codes. The on-disk launch-state layout and field names are unchanged.
 
 Session capture, lookup, reads, and enumeration understand native Codex JSONL
 rollouts, including archived sessions, fork metadata, partial trailing writes,
@@ -253,9 +255,9 @@ agreement. Compatible rebuilds/updates must remain usable automatically without
 manual restart; CLI banners, source revisions, and executable bytes must not
 be equality gates. Current integration has fixed-v1 validation and capability
 agreement; general version selection and automatic refreshed Runner agreement
-remain unfinished. The shared lifecycle foundation and cross-build replay/update
-qualification are separate work. This dependency/documentation correction adds
-none of those runtime mechanisms.
+remain unfinished. Launch uses the SDK's shared one-shot lifecycle;
+cross-build replay/update qualification across a full rebuild matrix remains
+separate work.
 
 ```sh
 cargo test

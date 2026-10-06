@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "agent-provider-execution"
 version = "0.1.0"
-source = "git+https://github.com/nestharus/agent-provider-sdk.git#27acb12acf53e50e9c0a615f99b5ec0acd2d9ef5"
+source = "git+https://github.com/nestharus/agent-provider-sdk.git#a27b2c966936e6503e5cd8b04cb89c6f115b265a"
 dependencies = [
  "fs2",
  "libc",
