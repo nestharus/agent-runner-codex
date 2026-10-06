@@ -496,6 +496,120 @@ fn corrupted_completed_journal_is_rejected_without_rerunning_native_work() {
     );
 }
 
+// Independent oracles for the durable actor identity: the leader's start time
+// within the current boot, and whether any member of the group remains.
+fn process_group_incarnation(pid: u32) -> std::io::Result<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let start = stat[stat.rfind(')').unwrap() + 1..]
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .to_string();
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    Ok(format!("linux:{}:{start}", boot.trim()))
+}
+fn process_group_is_live(group: u32) -> bool {
+    unsafe { libc::kill(-(group as i32), 0) == 0 }
+}
+
+#[test]
+fn launch_custody_keeps_its_durable_layout_and_recovers_only_the_recorded_actor() {
+    use agent_runner_codex::encoding::sha256_hex;
+    use std::os::unix::process::CommandExt;
+
+    let f = Fixture::new();
+    let first = f.invoke("launch", &f.request);
+    assert_eq!(first.0, 0);
+    let root = f.root.path().join("data/provider-state/codex/launch");
+    let key = sha256_hex(br#"["codex2","launch-fixture"]"#);
+    for extension in ["json", "jsonl", "lock", "session"] {
+        assert!(
+            root.join(format!("{key}.{extension}")).is_file(),
+            "{extension}"
+        );
+    }
+    let journal = fs::read(root.join(format!("{key}.jsonl"))).unwrap();
+    let state_path = root.join(format!("{key}.json"));
+    let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let mut fields = state
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "actor_id",
+            "digest",
+            "exit_code",
+            "incarnation",
+            "journal_len",
+            "journal_sha256",
+            "phase"
+        ]
+    );
+    assert_eq!(state["phase"], "complete");
+    assert_eq!(state["exit_code"], 0);
+    assert_eq!(state["actor_id"], Value::Null);
+    assert_eq!(state["journal_len"], journal.len());
+    assert_eq!(state["journal_sha256"], sha256_hex(&journal));
+
+    // An interrupted record names a process group. A live leader with another
+    // incarnation is a recycled identity and must not be signalled. After the
+    // recorded leader exits, its orphaned descendants are terminated. Neither
+    // retry starts another native turn.
+    let mut leader = std::process::Command::new("sh")
+        .args(["-c", "sleep 30 </dev/null >/dev/null 2>&1 & read _"])
+        .stdin(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let group = leader.id();
+    let incarnation = process_group_incarnation(group).unwrap();
+    let interrupted = |incarnation: &str| {
+        let mut record = state.clone();
+        record["phase"] = json!("running");
+        record["actor_id"] = json!(group);
+        record["incarnation"] = json!(incarnation);
+        record["exit_code"] = Value::Null;
+        record["journal_sha256"] = Value::Null;
+        record["journal_len"] = Value::Null;
+        fs::write(&state_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    };
+    interrupted("linux:recycled-boot:1");
+    let (code, response) = f.invoke("launch", &f.request);
+    assert_ne!(code, 0);
+    assert_eq!(
+        response[0]["error"]["code"],
+        "launch_reconciliation_required"
+    );
+    assert!(
+        leader.try_wait().unwrap().is_none(),
+        "recycled group was signalled"
+    );
+
+    drop(leader.stdin.take());
+    leader.wait().unwrap();
+    assert!(process_group_is_live(group), "descendant keeps the group");
+    interrupted(&incarnation);
+    let (code, response) = f.invoke("launch", &f.request);
+    assert_ne!(code, 0);
+    assert_eq!(
+        response[0]["error"]["code"],
+        "launch_reconciliation_required"
+    );
+    assert!(!process_group_is_live(group), "orphaned group survived");
+    assert_eq!(
+        fs::read_to_string(f.root.path().join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn expired_deadline_prevents_native_spawn() {
     let f = Fixture::new();

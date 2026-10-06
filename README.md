@@ -216,6 +216,16 @@ event. Incomplete requests retain their journal and require reconciliation;
 they do not claim a completed output receipt or silently execute again. A failed
 delivery of an already-completed replay leaves its durable receipt unchanged.
 
+The effect gate, process-group custody, bounded CLI output delivery, request
+locks, durable launch state, journal replay, launch-event framing, signal
+recording, and durable filesystem and encoding helpers come from the
+`agent-provider-execution` crate in
+[agent-provider-sdk](https://github.com/nestharus/agent-provider-sdk), pinned by
+Git revision in `Cargo.toml`. This adapter supplies its gate argument and
+descriptor variable, state root, request digest inputs, failure codes, native
+argv, environment, and Codex event translation. The on-disk launch-state layout
+and field names are unchanged.
+
 Session capture, lookup, reads, and enumeration understand native Codex JSONL
 rollouts, including archived sessions, fork metadata, partial trailing writes,
 and account-isolated transcript identity. Concurrent resumes of one session are
@@ -232,6 +242,8 @@ OpenCode-only implementation remains in the baseline Git history, rather than
 being exposed as a Codex capability with different semantics.
 
 ## Build and install
+
+Cargo fetches the pinned SDK revision from its public GitHub repository.
 
 ```sh
 cargo test

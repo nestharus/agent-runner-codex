@@ -3,9 +3,23 @@
 version = 4
 
 [[package]]
+name = "agent-provider-execution"
+version = "0.1.0"
+source = "git+https://github.com/nestharus/agent-provider-sdk.git?rev=2c58c0994b9cffd3581cb530ffa04d42e0d808b1#2c58c0994b9cffd3581cb530ffa04d42e0d808b1"
+dependencies = [
+ "fs2",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "agent-runner-codex"
 version = "0.1.0"
 dependencies = [
+ "agent-provider-execution",
  "chrono",
  "fs2",
  "jsonschema",

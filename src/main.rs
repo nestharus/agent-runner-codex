@@ -1,8 +1,5 @@
 //! Declared roles: orchestration, formatter
 
-#[cfg(unix)]
-mod cli_output;
-
 use std::io::Read;
 
 fn main() {
@@ -32,7 +29,7 @@ fn main() {
 fn write_request(args: &[String], stdin: &[u8]) -> i32 {
     #[cfg(unix)]
     if args.get(1).map(String::as_str) == Some("launch") {
-        let mut output = match cli_output::LaunchStdout::new() {
+        let mut output = match agent_provider_execution::delivery::BoundedOutput::stdout() {
             Ok(output) => output,
             Err(_) => return 1,
         };
