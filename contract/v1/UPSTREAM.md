@@ -31,8 +31,9 @@ accepting this observation extension. This work changes no other schema.
 
 `describe.schema.json` and `common.schema.json` are now byte-identical to the
 `agent-provider-sdk` snapshot at commit
-`e08c2743b13c593c25dacbd1dbe9fdd88c52af93` (Agent Runner `5d025b82` plus the
-host-selected `resident_session_v1` capability and its selector). Relative to
+`38acb566f985a77cd6a623257bfe7feb0302da62` (Agent Runner `5d025b82` plus the
+host-selected `resident_session_v1` capability and its selector, plus
+advertisement-only tolerance for future versions/capabilities). Relative to
 the previous carried copies this adds that capability, Runner's longer
 `launch_output_v1` description and the `provider_storage_contention` terminal
 kind. `contract/extensions/resident-session/v1.schema.json` is the SDK's

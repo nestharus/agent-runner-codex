@@ -68,7 +68,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::Builder::new()
-            .prefix("u92-codex-resident-")
+            .prefix("u92-correction-codex-resident-")
             .tempdir_in("/tmp")
             .unwrap();
         let r = root.path();
@@ -327,6 +327,7 @@ fn assert_dies(pid: i32) {
 
 #[test]
 fn describe_advertises_resident_session_only_when_selected() {
+    let registry = agent_provider_contract::SchemaRegistry::new();
     let f = Fixture::new();
     let selected = f.invoke("describe", f.host(true), json!({}));
     assert_eq!(
@@ -350,6 +351,40 @@ fn describe_advertises_resident_session_only_when_selected() {
     // Host side: the selected capability yields version 1.
     let capabilities = selected["result"]["capabilities"].as_object().unwrap();
     assert_eq!(extension::select(&[1], capabilities), Ok(1));
+    let mut future = selected.clone();
+    future["result"]["contract_versions"] = json!(["oulipoly.provider/v2", "oulipoly.provider/v1"]);
+    future["result"]["preferred_contract"] = json!("oulipoly.provider/v2");
+    future["result"]["capabilities"]["resident_session_v2"] = json!(true);
+    future["result"]["capabilities"]["future_capability"] = json!({"new_shape":42});
+    let admitted = registry
+        .decode_response::<agent_provider_contract::operations::Describe>(
+            &serde_json::to_vec(&future).unwrap(),
+        )
+        .unwrap();
+    let advertised = &admitted.value().result;
+    assert_eq!(
+        agent_provider_contract::negotiation::select_contract_version(
+            &["oulipoly.provider/v1"],
+            &advertised.contract_versions,
+            &advertised.preferred_contract
+        ),
+        Ok("oulipoly.provider/v1".into())
+    );
+    let caps = serde_json::to_value(&advertised.capabilities).unwrap();
+    assert_eq!(extension::select(&[1], caps.as_object().unwrap()), Ok(1));
+    future["result"]["capabilities"]["resident_session_v1"] = json!("true");
+    assert!(registry
+        .decode_response::<agent_provider_contract::operations::Describe>(
+            &serde_json::to_vec(&future).unwrap()
+        )
+        .is_err());
+    future["result"]["capabilities"]["resident_session_v1"] = json!(true);
+    future["result"]["preferred_contract"] = json!("oulipoly.provider/v3");
+    assert!(registry
+        .decode_response::<agent_provider_contract::operations::Describe>(
+            &serde_json::to_vec(&future).unwrap()
+        )
+        .is_err());
 }
 
 #[test]

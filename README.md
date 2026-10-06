@@ -715,3 +715,16 @@ readable, but cached page interpretations are not retroactively requalified.
 PTY native-ACK expansion and native response-progress correlation remain future
 work; current PTY transport/drain ACK and old prompt-submission markers keep their
 existing meaning.
+
+Resident correction: queued inputs bind native create/resume at dispatch from
+settled state. Consumption evidence with failed insertion persistence returns
+unknown (`-32011`), without ACK. Interrupted actors are discharged even if the
+current template changes, and are never rerun; unsettled custody cannot claim
+ended/close completion. Close releases its lock and worker. Dedup ACKs attest
+the original key only, not current prompt bytes. Describe admits future
+advertisements through the SDK's typed admission and common-version chooser,
+with declared preference and strict selected v1 payloads. Host replacement
+refresh, installed/native qualification and actual Runner joining remain open.
+The SDK's 0.2.0 v1 snapshot realignment replaces the former session page shape;
+it is not a compatible evolution or a wire major version. Other hosts are
+unqualified. Per-request terminal-unavailable selection remains required.
