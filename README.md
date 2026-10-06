@@ -216,8 +216,8 @@ event. Incomplete requests retain their journal and require reconciliation;
 they do not claim a completed output receipt or silently execute again. A failed
 delivery of an already-completed replay leaves its durable receipt unchanged.
 
-Launch runs through the shared one-shot lifecycle (`lifecycle::run_launch`) of
-the `agent-provider-execution` crate in
+Launch runs through the shared one-shot lifecycle (`lifecycle::run_launch_until`,
+with a stop flag that only resident turns set) of the `agent-provider-execution` crate in
 [agent-provider-sdk](https://github.com/nestharus/agent-provider-sdk), consumed
 without a manifest source-revision constraint. The SDK owns request custody,
 replay, reconciliation, admission, the effect gate, process-group custody,
@@ -235,6 +235,37 @@ serialized. A new Codex thread receives its ID from Codex.
 The negotiated `session_turn_pages_v1` protocol provides bounded native transcript
 pages and account-bound opaque cursors for the runner's completion and resume
 checks.
+
+### Resident sessions (`oulipoly.resident_session/v1`)
+
+A host that offers `host.env.OULIPOLY_HOST_RESIDENT_SESSION_V1=1` in `describe`
+receives `capabilities.resident_session_v1: true`; nothing else selects it, and
+an offer of another version alone advertises nothing. `resident.prepare`
+(params: the SDK extension's `protocol` and `launch` template, the same
+policy-evaluated `settings_id`/`mode`/`model`/`argv`/`env` a launch carries)
+checks the template the way a launch does (catalog route, managed argv, account,
+runtime configuration), records it durably and content-addressed under
+`<data_root>/provider-state/codex/resident/configs/<sha256>.json`, and answers
+`invocation.args = ["resident.serve", "--config", <path>]` with
+`endpoint: "stdio"`. The host appends those arguments to the same registered
+provider executable; the provider never names its own binary. `resident.serve`
+refuses a record whose content no longer matches its digest.
+
+`resident.serve` is the SDK's resident ACP v2 endpoint (`schema-v2.0.0-alpha.7`
+subset, protocol 2, message-key dedup). Every turn is an ordinary
+`codex exec --json` launch of the recorded template with the session's
+working directory, the prompt on stdin and `launch_output_v1` custody, run under
+the session's own launch state root and stop flag. The first turn lets Codex
+choose the thread (`thread.started`); later turns `resume` it within the same
+account, after the usual transcript ownership check and per-thread lock.
+`turn.started` is the consumption that acknowledges the prompt, each
+`agent_message` item is one ACP `agent_message`, and the turn ends with a tagged
+idle whose stop reason reflects the native outcome. `session/cancel` terminates
+only that turn's process group. Resume of a resident session after provider loss
+discharges the interrupted turn's recorded process group and never reruns it.
+The app-server shared runtime is not used. Deterministic coverage:
+`tests/codex_resident.rs` (fake `codex`, real provider binary, process-level ACP
+client).
 
 OpenCode session import, cross-account session replacement/rotation, arbitrary
 provider settings CRUD, and the shared app-server experiment are not implemented

@@ -25,6 +25,13 @@ pub fn describe(host: &crate::envelope::HostContext) -> Value {
     {
         result["capabilities"]["session_turn_pages_v1"] = json!(true);
     }
+    if let Some(capabilities) = result["capabilities"].as_object_mut() {
+        agent_provider_contract::resident_session::advertise(
+            capabilities,
+            agent_provider_contract::resident_session::SUPPORTED_VERSIONS,
+            host.env.as_ref(),
+        );
+    }
     result
 }
 
@@ -69,6 +76,7 @@ pub fn write_invocation<W: Write>(args: &[String], input: &[u8], writer: &mut W)
             "discovery.models" => discovery::models(),
             "discovery.accounts" => discovery::accounts(),
             "policy.evaluate" => policy::evaluate(&request)?,
+            crate::resident::PREPARE => crate::resident::prepare(&request)?,
             op if op.starts_with("quota.") => crate::quota::handle(op, &request)?,
             "terminal.classify" => terminal::classify_params(
                 request.params.clone(),

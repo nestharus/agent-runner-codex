@@ -20,6 +20,7 @@ use agent_provider_execution::{
     },
 };
 use serde_json::{json, Value};
+use std::sync::atomic::AtomicBool;
 use std::{
     collections::BTreeMap,
     fs::OpenOptions,
@@ -299,6 +300,27 @@ pub(crate) fn managed_native_args(
 }
 
 pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, ProviderFailure> {
+    static NEVER: AtomicBool = AtomicBool::new(false);
+    run_until(request, None, &NEVER, writer)
+}
+
+/// One resident turn: the same launch, under the resident session's own launch
+/// state root and stopped by its session-scoped stop flag.
+pub(crate) fn run_resident_turn<W: Write>(
+    request: &RequestEnvelope,
+    state_root: &Path,
+    stop: &AtomicBool,
+    writer: &mut W,
+) -> Result<i32, ProviderFailure> {
+    run_until(request, Some(state_root), stop, writer)
+}
+
+fn run_until<W: Write>(
+    request: &RequestEnvelope,
+    resident_state_root: Option<&Path>,
+    stop: &AtomicBool,
+    writer: &mut W,
+) -> Result<i32, ProviderFailure> {
     install_cancellation_handlers();
     let output_requested = output_requested(request)?;
     let plan = policy::plan(request, false)?;
@@ -351,7 +373,9 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| user.join(".local/share/oulipoly-agent-runner"));
-    let state_root = root.join("provider-state/codex/launch");
+    let state_root = resident_state_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.join("provider-state/codex/launch"));
     crate::durable_fs::create_private_directories(&state_root).map_err(io_failure)?;
     let spec = LaunchSpec {
         contract: CONTRACT,
@@ -377,7 +401,7 @@ pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, P
         failed: false,
         native_failure: None,
     };
-    lifecycle::run_launch(&spec, &mut adapter, writer)
+    lifecycle::run_launch_until(&spec, stop, &mut adapter, writer)
 }
 
 /// Codex plug points for the shared launch lifecycle: request digest, account

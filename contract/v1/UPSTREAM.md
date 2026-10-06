@@ -27,7 +27,20 @@ or a claim that the historical snapshot already allowed these totals. A paired
 consumer must align its executable result schema and native-I/O validator before
 accepting this observation extension. This work changes no other schema.
 
-The carried `common.schema.json` already differs from the historical hash below:
+## Resident-session alignment
+
+`describe.schema.json` and `common.schema.json` are now byte-identical to the
+`agent-provider-sdk` snapshot at commit
+`e08c2743b13c593c25dacbd1dbe9fdd88c52af93` (Agent Runner `5d025b82` plus the
+host-selected `resident_session_v1` capability and its selector). Relative to
+the previous carried copies this adds that capability, Runner's longer
+`launch_output_v1` description and the `provider_storage_contention` terminal
+kind. `contract/extensions/resident-session/v1.schema.json` is the SDK's
+extension schema at that commit. `session.schema.json` keeps the local AGE-347
+observation variant described above; the SDK carries Runner's later wording of
+the same allowance.
+
+The carried `common.schema.json` earlier differed from the historical hash below:
 provider commit `268e81dacd1b8b9b50e980bb9a7bae38a9d80468` added the separately
 selected terminal-unavailability extension. Its current SHA-256 is
 `aed77a4ce27a3f4a5d4b8a5c0aa00e8928a3d47464736fde0dd1e50d88d0f30b`.

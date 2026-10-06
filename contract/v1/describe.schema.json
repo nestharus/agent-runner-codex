@@ -29,7 +29,7 @@
         },
         "launch_output_v1": {
           "type": "boolean",
-          "description": "Advertises complete, duration-independent oulipoly.launch_output/v1 custody. A provider must omit this property unless selected with host.env.OULIPOLY_HOST_LAUNCH_OUTPUT_V1=1."
+          "description": "Advertises complete, duration-independent oulipoly.launch_output/v1 custody. A provider must omit this property unless selected with host.env.OULIPOLY_HOST_LAUNCH_OUTPUT_V1=1. Current hosts select this extension for launch dispatch and reject the dispatch before policy evaluation or launch unless the provider advertises true; providers that omit it or advertise false must be upgraded."
         },
         "policy": { "type": "boolean" },
         "quota": { "type": "boolean" },
@@ -37,6 +37,10 @@
         "session_turn_pages_v1": {
           "type": "boolean",
           "description": "Advertises bounded oulipoly.session_turn_pages/v1 support for session.read_turns. A provider must omit this property unless selected with host.env.OULIPOLY_HOST_SESSION_TURN_PAGES_V1=1."
+        },
+        "resident_session_v1": {
+          "type": "boolean",
+          "description": "Advertises the oulipoly.resident_session/v1 extension: the resident.prepare subcommand and the resident ACP v2 session endpoint it prepares (contract/extensions/resident-session). A provider must omit this property unless selected with host.env.OULIPOLY_HOST_RESIDENT_SESSION_V1=1. A host offers each resident-session version it supports with its own selector and uses the highest version it offered that the provider advertises; a provider advertises only offered versions it supports."
         },
         "session_enumerate": { "type": "boolean" },
         "terminal": { "type": "boolean" },
