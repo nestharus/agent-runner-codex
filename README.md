@@ -277,7 +277,8 @@ variable) keeps every managed Codex restriction above and replaces only the
 managed `agent_bash` MCP server: its command becomes this provider executable's
 `tool.bridge` subcommand, the SDK's mediated `bash` tool, still the only enabled
 tool (`mcp__agent_bash__bash`), with `env_vars` naming every inherited variable
-as before, which includes the policy and the ingress. The bridge refuses a
+as before, which includes the policy and the ingress (an exploration offer only
+when admitted, below). The bridge refuses a
 command outside an allow list and starts no requester; otherwise it runs only
 `requester run --delivery sync|async -- bash -lc COMMAND`, so the command reaches
 the root's own Bash ingress. `trusted-task` adds no other Codex tool.
@@ -305,6 +306,36 @@ refuses a policy (`tool_mediation_not_interactive`). Coverage:
 `tests/codex_tool_mediation.rs` (fake `codex` starting the configured server
 with only `env_vars`, requester stand-in, stand-in ingress socket). That a real
 Codex honours this configuration remains to be qualified.
+
+### Child exploration (`oulipoly.exploration/v1`)
+
+`describe` advertises `exploration_v1` only when the request's `host.env`
+selected `OULIPOLY_HOST_EXPLORATION_V1=1`. A launch or resident template whose
+environment also carries the host's offer (`OULIPOLY_EXPLORATION_V1`: opaque
+route labels, the host's child requester and the name of its owner ingress
+variable) is admitted with the SDK's `exploration::admit`: an offer the
+request's host did not select, one without a tool mediation policy, or an
+invalid one is refused (`policy.evaluate` `accepted: false`, `resident.prepare`
+error) rather than ignored. Every exec launch and resident turn admits it
+again before Codex starts.
+
+An admitted offer adds one tool and nothing else. The same `agent_bash`
+bridge serves the SDK's non-command `explore` tool beside `bash`, and
+`enabled_tools` becomes `["bash", "explore"]` (`mcp__agent_bash__explore`).
+`policy.evaluate` reports the `oulipoly.exploration/v1` marker with that native
+name, and the tool-mediation marker lists it in `native_tools`. The bridge
+asks the host's owner through the host's requester, and the owner admits or
+refuses each child. A launch without an admitted offer keeps `bash` alone: the
+variable is removed from Codex's environment and left out of `env_vars`, so an
+inherited `OULIPOLY_EXPLORATION_V1` is never treated as an offer. A mediated
+launch is refused (`exploration_ingress_unavailable`) before Codex starts when
+the offer's ingress variable is missing. The interactive TUI takes no offer,
+as it takes no tool mediation.
+
+Coverage: `tests/codex_tool_mediation.rs`, with the same fakes plus a child
+requester stand-in. These fakes show the provider's configuration only, not that a
+real Codex hides or offers exactly these tools, nor that a model uses
+`explore` well.
 
 OpenCode session import, cross-account session replacement/rotation, arbitrary
 provider settings CRUD, and the shared app-server experiment are not implemented

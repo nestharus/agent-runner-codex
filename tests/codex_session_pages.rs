@@ -617,6 +617,7 @@ fn age343_canonical_backfill_does_not_change_native_resume_argv_authority() {
         env: BTreeMap::new(),
         argv: vec![],
         mediation: None,
+        exploration: None,
     };
     // Pure argv composition; neither provider nor native CLI is launched.
     let before = native_args(&config, &plan, &BTreeMap::new(), Some(ID));

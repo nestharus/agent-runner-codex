@@ -36,6 +36,11 @@ pub fn describe(host: &crate::envelope::HostContext) -> Value {
             agent_provider_contract::tool_mediation::SUPPORTED_VERSIONS,
             host.env.as_ref(),
         );
+        agent_provider_contract::exploration::advertise(
+            capabilities,
+            agent_provider_contract::exploration::SUPPORTED_VERSIONS,
+            host.env.as_ref(),
+        );
     }
     result
 }

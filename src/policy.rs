@@ -1,6 +1,7 @@
 //! Codex owns model, prompt, tool, and account selection before native execution.
 use crate::envelope::{HostContext, ProviderFailure, RequestEnvelope};
 use crate::{account, models};
+use agent_provider_contract::exploration::{self, Exploration, ExplorationError};
 use agent_provider_contract::tool_mediation::{self, ToolMediation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -185,10 +186,46 @@ pub struct Plan {
     /// environment: the managed `agent_bash` MCP server is then the SDK's
     /// mediated tool bridge under exactly this policy.
     pub mediation: Option<ToolMediation>,
+    /// The host's admitted `oulipoly.exploration/v1` offer: the same bridge
+    /// then also serves `explore`, and Codex enables it. Never present
+    /// without `mediation`.
+    pub exploration: Option<Exploration>,
 }
 
 /// Codex's name for the mediated tool (`mcp__<server>__<tool>`).
 pub const MEDIATED_TOOL: &str = "mcp__agent_bash__bash";
+/// Codex's name for the bridge's exploration tool.
+pub const EXPLORE_TOOL: &str = "mcp__agent_bash__explore";
+
+impl Plan {
+    /// Every tool Codex is offered under the host's mediation.
+    pub fn native_tools(&self) -> Vec<String> {
+        let mut tools = vec![MEDIATED_TOOL.to_owned()];
+        if self.exploration.is_some() {
+            tools.push(EXPLORE_TOOL.to_owned());
+        }
+        tools
+    }
+}
+
+/// Admits the launch's exploration offer, if any. An offer this request's
+/// host did not select, or one without tool mediation, is refused rather
+/// than ignored.
+fn admit_exploration(
+    request: &RequestEnvelope,
+    env: &BTreeMap<String, String>,
+    mediation: Option<&ToolMediation>,
+) -> Result<Option<Exploration>, ProviderFailure> {
+    exploration::admit(request.host.env.as_ref(), Some(env), mediation).map_err(|error| {
+        let code = match error {
+            ExplorationError::Invalid(_) => "exploration_invalid",
+            ExplorationError::NotSelected => "exploration_not_selected",
+            ExplorationError::WithoutMediation => "exploration_without_mediation",
+            ExplorationError::NoIngress(_) => "exploration_ingress_unavailable",
+        };
+        invalid(code, &error.to_string())
+    })
+}
 
 pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, ProviderFailure> {
     let params = &request.params;
@@ -308,6 +345,7 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
     }
     let mediation = tool_mediation::required_by_host(request.host.env.as_ref(), Some(&env))
         .map_err(|error| invalid("tool_mediation_invalid", &error.to_string()))?;
+    let exploration = admit_exploration(request, &env, mediation.as_ref())?;
     env.insert("CODEX_HOME".into(), codex_home.display().to_string());
     // Managed TUI parents export a SQLite home separately from CODEX_HOME.
     // Rebind both stores when a child selects another account.
@@ -340,6 +378,7 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
         env,
         argv: canonical,
         mediation,
+        exploration,
     })
 }
 
@@ -356,7 +395,11 @@ pub fn evaluate(request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
                 // Codex's other tools are disabled by the managed feature set and
                 // model catalog for every launch; trusted-task adds none.
                 markers.push(json!({"name": tool_mediation::MARKER,
-                    "value": mediation.effective(MEDIATED_TOOL, vec![MEDIATED_TOOL.to_owned()])}));
+                    "value": mediation.effective(MEDIATED_TOOL, plan.native_tools())}));
+            }
+            if let Some(offer) = &plan.exploration {
+                markers.push(json!({"name": exploration::MARKER,
+                    "value": offer.effective(EXPLORE_TOOL)}));
             }
             Ok(json!({"accepted": true, "argv": plan.argv, "env": plan.env,
                 "stdin": plan.prompt, "prompt": plan.prompt, "diagnostics": [],
