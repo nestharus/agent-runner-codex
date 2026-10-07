@@ -279,9 +279,21 @@ pub(crate) fn managed_native_args(
         .filter_map(|(key, _)| key.into_string().ok())
         .chain(env.keys().cloned())
         .collect();
+    // Under the host's tool mediation the same managed server is the SDK's
+    // mediated tool bridge, served by this provider executable.
+    let (command, server_args) = match &plan.mediation {
+        Some(_) => (
+            json!(bridge_executable().unwrap_or_default()),
+            json!([agent_provider_execution::tool_bridge::SUBCOMMAND]),
+        ),
+        None => (
+            json!(config.bun_bin),
+            json!(["--no-install", config.bash_mcp_path]),
+        ),
+    };
     for (key, value) in [
-        ("command", json!(config.bun_bin)),
-        ("args", json!(["--no-install", config.bash_mcp_path])),
+        ("command", command),
+        ("args", server_args),
         ("env_vars", json!(env_vars)),
         ("enabled_tools", json!(["bash"])),
         ("required", json!(true)),
@@ -297,6 +309,39 @@ pub(crate) fn managed_native_args(
         ]);
     }
     args
+}
+
+/// This provider's own executable, as the mediated tool bridge's command. A
+/// replaced file at the same path is the compatible replacement that serves.
+pub(crate) fn bridge_executable() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let exe = exe
+        .to_str()
+        .ok_or("provider executable path is not UTF-8")?;
+    Ok(exe.strip_suffix(" (deleted)").unwrap_or(exe).to_owned())
+}
+
+/// Refuses a mediated launch before any native effect unless the root's
+/// Bash ingress reaches Codex's environment (and so the bridge's, through
+/// `env_vars`) and the bridge executable is known.
+fn admit_mediation(request: &RequestEnvelope, plan: &Plan) -> Result<(), ProviderFailure> {
+    let Some(policy) = &plan.mediation else {
+        return Ok(());
+    };
+    let unavailable = |message: String| {
+        ProviderFailure::unsupported("", "tool_mediation_ingress_unavailable", message)
+    };
+    policy
+        .ingress(|name| {
+            plan.env
+                .get(name)
+                .or_else(|| request.host.env.as_ref().and_then(|env| env.get(name)))
+                .cloned()
+                .or_else(|| std::env::var(name).ok())
+        })
+        .map_err(|error| unavailable(error.to_string()))?;
+    bridge_executable().map_err(unavailable)?;
+    Ok(())
 }
 
 pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, ProviderFailure> {
@@ -324,6 +369,7 @@ fn run_until<W: Write>(
     install_cancellation_handlers();
     let output_requested = output_requested(request)?;
     let plan = policy::plan(request, false)?;
+    admit_mediation(request, &plan)?;
     let config = RuntimeConfig::load(&request.host)?;
     let working_directory = request
         .params
