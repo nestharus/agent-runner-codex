@@ -267,6 +267,32 @@ The app-server shared runtime is not used. Deterministic coverage:
 `tests/codex_resident.rs` (fake `codex`, real provider binary, process-level ACP
 client).
 
+### Host tool mediation (`oulipoly.tool_mediation/v1`)
+
+`describe` advertises `tool_mediation_v1` only when the request's `host.env`
+selected `OULIPOLY_HOST_TOOL_MEDIATION_V1=1`. A launch or resident template whose
+environment carries the host's policy (`OULIPOLY_TOOL_MEDIATION_V1`: a Bash allow
+list or `trusted-task`, the host's requester and the name of its Bash ingress
+variable) keeps every managed Codex restriction above and replaces only the
+managed `agent_bash` MCP server: its command becomes this provider executable's
+`tool.bridge` subcommand, the SDK's mediated `bash` tool, still the only enabled
+tool (`mcp__agent_bash__bash`), with `env_vars` naming every inherited variable
+as before, which includes the policy and the ingress. The bridge refuses a
+command outside an allow list and starts no requester; otherwise it runs only
+`requester run --delivery sync|async -- bash -lc COMMAND`, so the command reaches
+the root's own Bash ingress. `trusted-task` adds no other Codex tool.
+
+`policy.evaluate` admits the policy strictly (an invalid one, or a host
+selection without one, is `accepted: false`) and reports it as an
+`oulipoly.tool_mediation/v1` marker. `resident.prepare` refuses the same. Every
+mediated exec launch and resident turn is refused
+(`tool_mediation_ingress_unavailable`) before Codex starts unless the named
+ingress variable is in the launch's effective environment; the interactive TUI
+refuses a policy (`tool_mediation_not_interactive`). Coverage:
+`tests/codex_tool_mediation.rs` (fake `codex` starting the configured server
+with only `env_vars`, requester stand-in, stand-in ingress socket). That a real
+Codex honours this configuration remains to be qualified.
+
 OpenCode session import, cross-account session replacement/rotation, arbitrary
 provider settings CRUD, and the shared app-server experiment are not implemented
 by this temporary adapter. They are not advertised as available capabilities.
@@ -728,3 +754,10 @@ refresh, installed/native qualification and actual Runner joining remain open.
 The SDK's 0.2.0 v1 snapshot realignment replaces the former session page shape;
 it is not a compatible evolution or a wire major version. Other hosts are
 unqualified. Per-request terminal-unavailable selection remains required.
+
+Selected tool mediation validates the native CLI, system prompt and managed model
+catalog but does not require the unused Bun/MCP TypeScript or old Agent Bash /
+Runner installation files. Unselected launches retain their existing checks.
+One-shot ingress and dependency admission run only for fresh native preparation:
+completed identical requests replay their durable bytes, and incomplete actor
+custody is reconciled, without current ingress or native/tool files.

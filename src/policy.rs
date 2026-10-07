@@ -1,6 +1,7 @@
 //! Codex owns model, prompt, tool, and account selection before native execution.
 use crate::envelope::{HostContext, ProviderFailure, RequestEnvelope};
 use crate::{account, models};
+use agent_provider_contract::tool_mediation::{self, ToolMediation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -59,6 +60,12 @@ impl RuntimeConfig {
     }
 
     pub fn validate(&self) -> Result<(), ProviderFailure> {
+        self.validate_for_mediation(false)
+    }
+
+    /// The mediated MCP command uses the SDK bridge, not the Bun integration.
+    /// The model catalog and prompt remain native configuration dependencies.
+    pub(crate) fn validate_for_mediation(&self, mediated: bool) -> Result<(), ProviderFailure> {
         for (name, path) in [
             ("codex_bin", &self.codex_bin),
             ("bun_bin", &self.bun_bin),
@@ -67,6 +74,14 @@ impl RuntimeConfig {
             ("agent_bash_bin", &self.agent_bash_bin),
             ("agent_runner_bin", &self.agent_runner_bin),
         ] {
+            let unused = mediated
+                && matches!(
+                    name,
+                    "bun_bin" | "bash_mcp_path" | "agent_bash_bin" | "agent_runner_bin"
+                );
+            if unused {
+                continue;
+            }
             if !path.is_absolute() || !path.is_file() {
                 return Err(invalid(
                     "runtime_dependency_missing",
@@ -77,7 +92,22 @@ impl RuntimeConfig {
                 ));
             }
         }
-        let catalog = self.bash_mcp_path.parent().unwrap().join("models.json");
+        if !self.bash_mcp_path.is_absolute() {
+            return Err(invalid(
+                "runtime_dependency_missing",
+                "bash_mcp_path must locate an absolute model catalog directory",
+            ));
+        }
+        let catalog = self
+            .bash_mcp_path
+            .parent()
+            .ok_or_else(|| {
+                invalid(
+                    "model_catalog_unreadable",
+                    "Model catalog directory is unavailable",
+                )
+            })?
+            .join("models.json");
         let catalog_bytes = crate::durable_fs::read_file_bounded(&catalog, 4 * 1024 * 1024)
             .map_err(|_| {
                 invalid(
@@ -151,7 +181,14 @@ pub struct Plan {
     pub prompt: String,
     pub env: BTreeMap<String, String>,
     pub argv: Vec<String>,
+    /// The host's `oulipoly.tool_mediation/v1` policy carried by the launch
+    /// environment: the managed `agent_bash` MCP server is then the SDK's
+    /// mediated tool bridge under exactly this policy.
+    pub mediation: Option<ToolMediation>,
 }
+
+/// Codex's name for the mediated tool (`mcp__<server>__<tool>`).
+pub const MEDIATED_TOOL: &str = "mcp__agent_bash__bash";
 
 pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, ProviderFailure> {
     let params = &request.params;
@@ -269,6 +306,8 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
             ));
         }
     }
+    let mediation = tool_mediation::required_by_host(request.host.env.as_ref(), Some(&env))
+        .map_err(|error| invalid("tool_mediation_invalid", &error.to_string()))?;
     env.insert("CODEX_HOME".into(), codex_home.display().to_string());
     // Managed TUI parents export a SQLite home separately from CODEX_HOME.
     // Rebind both stores when a child selects another account.
@@ -300,17 +339,29 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
         prompt,
         env,
         argv: canonical,
+        mediation,
     })
 }
 
 pub fn evaluate(request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
     match plan(request, true).and_then(|plan| {
-        RuntimeConfig::load(&request.host)?.validate()?;
+        RuntimeConfig::load(&request.host)?.validate_for_mediation(plan.mediation.is_some())?;
         Ok(plan)
     }) {
-        Ok(plan) => Ok(json!({"accepted": true, "argv": plan.argv, "env": plan.env,
-            "stdin": plan.prompt, "prompt": plan.prompt, "diagnostics": [],
-            "markers": [{"name":"codex.route", "value":{"account":plan.settings_id,"model":plan.model,"effort":plan.effort}}]})),
+        Ok(plan) => {
+            let mut markers = vec![
+                json!({"name":"codex.route", "value":{"account":plan.settings_id,"model":plan.model,"effort":plan.effort}}),
+            ];
+            if let Some(mediation) = &plan.mediation {
+                // Codex's other tools are disabled by the managed feature set and
+                // model catalog for every launch; trusted-task adds none.
+                markers.push(json!({"name": tool_mediation::MARKER,
+                    "value": mediation.effective(MEDIATED_TOOL, vec![MEDIATED_TOOL.to_owned()])}));
+            }
+            Ok(json!({"accepted": true, "argv": plan.argv, "env": plan.env,
+                "stdin": plan.prompt, "prompt": plan.prompt, "diagnostics": [],
+                "markers": markers}))
+        }
         Err(error) => Ok(
             json!({"accepted": false, "diagnostics": [{"severity":"error", "code":error.code,"message":error.message}], "markers":[]}),
         ),

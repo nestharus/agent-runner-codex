@@ -185,6 +185,13 @@ fn prepare(args: &[String]) -> Result<(Command, RequestEnvelope), ProviderFailur
         }
     }
     let plan = policy::plan(&request, true)?;
+    if plan.mediation.is_some() {
+        return Err(ProviderFailure::unsupported(
+            "",
+            "tool_mediation_not_interactive",
+            "oulipoly.tool_mediation/v1 is applied to exec launches and resident turns, not the interactive TUI",
+        ));
+    }
     let mut config = RuntimeConfig::load(&request.host)?;
     if !config.codex_bin.is_absolute() || !config.codex_bin.is_file() {
         return Err(ProviderFailure::invalid_settings(
