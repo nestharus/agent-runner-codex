@@ -11,6 +11,7 @@ use crate::{
     policy::{self, Plan, RuntimeConfig},
     terminal,
 };
+use agent_provider_contract::exploration;
 use agent_provider_execution::{
     custody::{self, CustodyError, RequestCustody},
     framing::FramingError,
@@ -275,10 +276,17 @@ pub(crate) fn managed_native_args(
     ] {
         args.extend(["-c".into(), format!("features.{feature}=false")]);
     }
+    // An exploration offer reaches the bridge only when admitted; an
+    // inherited variable of that name is not an offer.
     let env_vars: std::collections::BTreeSet<String> = std::env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
         .chain(env.keys().cloned())
+        .filter(|key| key != exploration::ENV || plan.exploration.is_some())
         .collect();
+    let mut enabled_tools = vec!["bash"];
+    if plan.exploration.is_some() {
+        enabled_tools.push(agent_provider_execution::explore_tool::TOOL);
+    }
     // Under the host's tool mediation the same managed server is the SDK's
     // mediated tool bridge, served by this provider executable.
     let (command, server_args) = match &plan.mediation {
@@ -295,7 +303,7 @@ pub(crate) fn managed_native_args(
         ("command", command),
         ("args", server_args),
         ("env_vars", json!(env_vars)),
-        ("enabled_tools", json!(["bash"])),
+        ("enabled_tools", json!(enabled_tools)),
         ("required", json!(true)),
         ("startup_timeout_sec", json!(20)),
         ("tool_timeout_sec", json!(86400)),
@@ -322,8 +330,9 @@ pub(crate) fn bridge_executable() -> Result<String, String> {
 }
 
 /// Refuses a mediated launch before any native effect unless the root's
-/// Bash ingress reaches Codex's environment (and so the bridge's, through
-/// `env_vars`) and the bridge executable is known.
+/// Bash ingress (and an admitted exploration offer's owner ingress) reaches
+/// Codex's environment (and so the bridge's, through `env_vars`) and the
+/// bridge executable is known.
 fn admit_mediation(request: &RequestEnvelope, plan: &Plan) -> Result<(), ProviderFailure> {
     let Some(policy) = &plan.mediation else {
         return Ok(());
@@ -331,15 +340,21 @@ fn admit_mediation(request: &RequestEnvelope, plan: &Plan) -> Result<(), Provide
     let unavailable = |message: String| {
         ProviderFailure::unsupported("", "tool_mediation_ingress_unavailable", message)
     };
+    let lookup = |name: &str| {
+        plan.env
+            .get(name)
+            .or_else(|| request.host.env.as_ref().and_then(|env| env.get(name)))
+            .cloned()
+            .or_else(|| std::env::var(name).ok())
+    };
     policy
-        .ingress(|name| {
-            plan.env
-                .get(name)
-                .or_else(|| request.host.env.as_ref().and_then(|env| env.get(name)))
-                .cloned()
-                .or_else(|| std::env::var(name).ok())
-        })
+        .ingress(lookup)
         .map_err(|error| unavailable(error.to_string()))?;
+    if let Some(offer) = &plan.exploration {
+        offer.ingress(lookup).map_err(|error| {
+            ProviderFailure::unsupported("", "exploration_ingress_unavailable", error.to_string())
+        })?;
+    }
     bridge_executable().map_err(unavailable)?;
     Ok(())
 }
@@ -545,7 +560,12 @@ impl LaunchAdapter for CodexLaunch<'_> {
         // Only the explicit policy-admitted launch environment may carry account
         // instructions; parent process/host environments are stale for this turn.
         env.remove("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS");
+        // Likewise only the admitted offer may reach Codex and its bridge.
+        env.remove(exploration::ENV);
         env.extend(plan.env.clone());
+        if plan.exploration.is_none() {
+            env.remove(exploration::ENV);
+        }
         if env
             .get("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS")
             .is_some_and(|value| value.trim().is_empty())
@@ -603,6 +623,7 @@ impl LaunchAdapter for CodexLaunch<'_> {
             "AGENT_RUNNER_CODEX_SESSION_BINDING",
             "AGENT_RUNNER_CODEX_REGISTRATION_CWD",
             "AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS",
+            exploration::ENV,
         ] {
             gate.command_mut().env_remove(key);
         }

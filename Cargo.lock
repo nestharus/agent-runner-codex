@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "agent-provider-contract"
 version = "0.2.0"
-source = "git+https://github.com/nestharus/agent-provider-sdk.git#9b7820441466787b50c3f31d72a6722eb31e40bc"
+source = "git+https://github.com/nestharus/agent-provider-sdk.git#d6fc21af377dfce16a5ba2b49c0361fa465d4492"
 dependencies = [
  "base64",
  "jsonschema 0.46.5",
@@ -17,7 +17,7 @@ dependencies = [
 [[package]]
 name = "agent-provider-execution"
 version = "0.2.0"
-source = "git+https://github.com/nestharus/agent-provider-sdk.git#9b7820441466787b50c3f31d72a6722eb31e40bc"
+source = "git+https://github.com/nestharus/agent-provider-sdk.git#d6fc21af377dfce16a5ba2b49c0361fa465d4492"
 dependencies = [
  "agent-provider-contract",
  "fs2",
