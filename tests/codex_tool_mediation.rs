@@ -236,7 +236,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::Builder::new()
-            .prefix("u94-codex-mediation-")
+            .prefix("u94-correction-codex-mediation-")
             .tempdir_in("/tmp")
             .unwrap();
         let r = root.path();
@@ -661,4 +661,116 @@ fn cancelling_a_turn_ends_the_bridge_and_requester_in_its_group() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn one_shot_request(f: &Fixture, id: &str, mediated: bool) -> Value {
+    let mut params = f.template(mediated.then(|| f.policy(json!({"authority":"trusted-task"}))));
+    params["prompt"] = json!("hi");
+    params["model"]["inputs"]["prompt"] = json!("hi");
+    params["working_directory"] = json!(f.path().join("work"));
+    let mut host = f.host();
+    if !mediated {
+        host["env"]
+            .as_object_mut()
+            .unwrap()
+            .remove("OULIPOLY_HOST_TOOL_MEDIATION_V1");
+    }
+    json!({"contract":"oulipoly.provider/v1", "request_id":id, "host":host, "params":params})
+}
+
+fn launch(f: &Fixture, request: &Value, ingress: bool) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agent-runner-codex"));
+    command
+        .arg("launch")
+        .env_remove(INGRESS_ENV)
+        .current_dir(f.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if ingress {
+        command.env(INGRESS_ENV, "unused-fake-ingress");
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(request.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn mediated_native_starts_drop_old_install_prerequisites_but_keep_real_dependencies() {
+    let f = Fixture::new();
+    for name in ["bash", "mcp.ts"] {
+        std::fs::remove_file(f.path().join(name)).unwrap();
+    }
+    let prepared = f.prepare(f.template(Some(f.policy(json!({"authority":"trusted-task"})))));
+    assert_eq!(prepared["ok"], json!(true), "{prepared}");
+    let first = launch(&f, &one_shot_request(&f, "minimal", true), true);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    assert_eq!(f.calls().len(), 1);
+    let plain = launch(&f, &one_shot_request(&f, "unselected", false), true);
+    assert!(
+        !plain.status.success()
+            && String::from_utf8_lossy(&plain.stdout).contains("runtime_dependency_missing")
+    );
+    std::fs::remove_file(f.path().join("models.json")).unwrap();
+    let missing_catalog = launch(&f, &one_shot_request(&f, "missing-catalog", true), true);
+    assert!(
+        !missing_catalog.status.success()
+            && String::from_utf8_lossy(&missing_catalog.stdout)
+                .contains("model_catalog_unreadable")
+    );
+    assert_eq!(f.calls().len(), 1);
+}
+
+#[test]
+fn completed_one_shot_replays_without_ingress_or_current_native_tools() {
+    let f = Fixture::new();
+    let request = one_shot_request(&f, "tool-free-replay", true);
+    let first = launch(&f, &request, true);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    for name in [
+        "codex",
+        "bash",
+        "requester",
+        "mcp.ts",
+        "models.json",
+        "ai/AGENTS.md",
+    ] {
+        std::fs::remove_file(f.path().join(name)).unwrap();
+    }
+    let replay = launch(&f, &request, false);
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stdout)
+    );
+    assert_eq!(first.stdout, replay.stdout);
+    assert_eq!(f.calls().len(), 1);
+    let mut fresh = request.clone();
+    fresh["request_id"] = json!("fresh-no-ingress");
+    let no_ingress = launch(&f, &fresh, false);
+    assert!(
+        !no_ingress.status.success()
+            && String::from_utf8_lossy(&no_ingress.stdout)
+                .contains("tool_mediation_ingress_unavailable")
+    );
+    fresh["request_id"] = json!("fresh-no-native");
+    let no_native = launch(&f, &fresh, true);
+    assert!(
+        !no_native.status.success()
+            && String::from_utf8_lossy(&no_native.stdout).contains("runtime_dependency_missing")
+    );
+    assert_eq!(f.calls().len(), 1);
 }

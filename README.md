@@ -754,3 +754,10 @@ refresh, installed/native qualification and actual Runner joining remain open.
 The SDK's 0.2.0 v1 snapshot realignment replaces the former session page shape;
 it is not a compatible evolution or a wire major version. Other hosts are
 unqualified. Per-request terminal-unavailable selection remains required.
+
+Selected tool mediation validates the native CLI, system prompt and managed model
+catalog but does not require the unused Bun/MCP TypeScript or old Agent Bash /
+Runner installation files. Unselected launches retain their existing checks.
+One-shot ingress and dependency admission run only for fresh native preparation:
+completed identical requests replay their durable bytes, and incomplete actor
+custody is reconciled, without current ingress or native/tool files.

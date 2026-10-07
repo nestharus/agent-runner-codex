@@ -60,6 +60,12 @@ impl RuntimeConfig {
     }
 
     pub fn validate(&self) -> Result<(), ProviderFailure> {
+        self.validate_for_mediation(false)
+    }
+
+    /// The mediated MCP command uses the SDK bridge, not the Bun integration.
+    /// The model catalog and prompt remain native configuration dependencies.
+    pub(crate) fn validate_for_mediation(&self, mediated: bool) -> Result<(), ProviderFailure> {
         for (name, path) in [
             ("codex_bin", &self.codex_bin),
             ("bun_bin", &self.bun_bin),
@@ -68,6 +74,14 @@ impl RuntimeConfig {
             ("agent_bash_bin", &self.agent_bash_bin),
             ("agent_runner_bin", &self.agent_runner_bin),
         ] {
+            let unused = mediated
+                && matches!(
+                    name,
+                    "bun_bin" | "bash_mcp_path" | "agent_bash_bin" | "agent_runner_bin"
+                );
+            if unused {
+                continue;
+            }
             if !path.is_absolute() || !path.is_file() {
                 return Err(invalid(
                     "runtime_dependency_missing",
@@ -78,7 +92,22 @@ impl RuntimeConfig {
                 ));
             }
         }
-        let catalog = self.bash_mcp_path.parent().unwrap().join("models.json");
+        if !self.bash_mcp_path.is_absolute() {
+            return Err(invalid(
+                "runtime_dependency_missing",
+                "bash_mcp_path must locate an absolute model catalog directory",
+            ));
+        }
+        let catalog = self
+            .bash_mcp_path
+            .parent()
+            .ok_or_else(|| {
+                invalid(
+                    "model_catalog_unreadable",
+                    "Model catalog directory is unavailable",
+                )
+            })?
+            .join("models.json");
         let catalog_bytes = crate::durable_fs::read_file_bounded(&catalog, 4 * 1024 * 1024)
             .map_err(|_| {
                 invalid(

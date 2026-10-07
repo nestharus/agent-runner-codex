@@ -369,7 +369,6 @@ fn run_until<W: Write>(
     install_cancellation_handlers();
     let output_requested = output_requested(request)?;
     let plan = policy::plan(request, false)?;
-    admit_mediation(request, &plan)?;
     let config = RuntimeConfig::load(&request.host)?;
     let working_directory = request
         .params
@@ -489,7 +488,8 @@ impl LaunchAdapter for CodexLaunch<'_> {
         let plan = &self.plan;
         let config = &self.config;
         let session = self.session;
-        config.validate()?;
+        admit_mediation(request, plan)?;
+        config.validate_for_mediation(plan.mediation.is_some())?;
         if !Path::new(self.working_directory).is_dir() {
             return Err(failure(
                 "invalid_working_directory",

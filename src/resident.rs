@@ -108,8 +108,8 @@ pub fn prepare(request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
         "resident probe",
         None,
     )?;
-    policy::plan(&probe, false)?;
-    policy::RuntimeConfig::load(&probe.host)?.validate()?;
+    let plan = policy::plan(&probe, false)?;
+    policy::RuntimeConfig::load(&probe.host)?.validate_for_mediation(plan.mediation.is_some())?;
     let bytes = canonical_json_bytes(&config);
     let digest = sha256_hex(&bytes);
     let directory = resident_root(&request.host)?.join("configs");
