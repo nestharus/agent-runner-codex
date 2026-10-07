@@ -282,6 +282,19 @@ command outside an allow list and starts no requester; otherwise it runs only
 `requester run --delivery sync|async -- bash -lc COMMAND`, so the command reaches
 the root's own Bash ingress. `trusted-task` adds no other Codex tool.
 
+The shared bridge uses ordered durable `accepted` / `started.exec_error` stage
+evidence to report a failed program exec with its diagnostic and `isError: true`.
+It retains accepted custody, possible setup effects and the warning against
+replay. A failed async exec does not claim the program is running; a later
+completion is claimed only with the matching acceptance, detach and output
+reference. Wait status and output proof remain separate facts. Exit code 127
+alone is an ordinary numeric wait, not proof of failed exec. Historical requester
+results with the same stage evidence work without a new schema or version gate.
+Finite checks of rebuilt provider bridges with collected results and stand-in
+requesters qualify rendering only; an all-real bridge-originated failed shell
+exec and real native tool efficacy remain unqualified. Internally inconsistent
+requester objects can conservatively render unresolved and lose a diagnostic.
+
 `policy.evaluate` admits the policy strictly (an invalid one, or a host
 selection without one, is `accepted: false`) and reports it as an
 `oulipoly.tool_mediation/v1` marker. `resident.prepare` refuses the same. Every
