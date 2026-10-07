@@ -345,7 +345,7 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
 
 pub fn evaluate(request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
     match plan(request, true).and_then(|plan| {
-        RuntimeConfig::load(&request.host)?.validate()?;
+        RuntimeConfig::load(&request.host)?.validate_for_mediation(plan.mediation.is_some())?;
         Ok(plan)
     }) {
         Ok(plan) => {

@@ -706,6 +706,20 @@ fn mediated_native_starts_drop_old_install_prerequisites_but_keep_real_dependenc
     for name in ["bash", "mcp.ts"] {
         std::fs::remove_file(f.path().join(name)).unwrap();
     }
+    let evaluate = |mediated| {
+        let request = one_shot_request(&f, "minimal-policy", mediated);
+        let mut params = request["params"].clone();
+        params["launch"] = json!({"argv":params["argv"], "env":params["env"]});
+        f.invoke("policy.evaluate", request["host"].clone(), params)["result"].clone()
+    };
+    let policy = evaluate(true);
+    assert_eq!(policy["accepted"], json!(true), "{policy}");
+    let plain_policy = evaluate(false);
+    assert_eq!(plain_policy["accepted"], json!(false), "{plain_policy}");
+    assert_eq!(
+        plain_policy["diagnostics"][0]["code"],
+        json!("runtime_dependency_missing")
+    );
     let prepared = f.prepare(f.template(Some(f.policy(json!({"authority":"trusted-task"})))));
     assert_eq!(prepared["ok"], json!(true), "{prepared}");
     let first = launch(&f, &one_shot_request(&f, "minimal", true), true);
@@ -721,6 +735,12 @@ fn mediated_native_starts_drop_old_install_prerequisites_but_keep_real_dependenc
             && String::from_utf8_lossy(&plain.stdout).contains("runtime_dependency_missing")
     );
     std::fs::remove_file(f.path().join("models.json")).unwrap();
+    let missing_catalog_policy = evaluate(true);
+    assert_eq!(missing_catalog_policy["accepted"], json!(false));
+    assert_eq!(
+        missing_catalog_policy["diagnostics"][0]["code"],
+        json!("model_catalog_unreadable")
+    );
     let missing_catalog = launch(&f, &one_shot_request(&f, "missing-catalog", true), true);
     assert!(
         !missing_catalog.status.success()
