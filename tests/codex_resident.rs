@@ -69,7 +69,7 @@ impl Fixture {
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("u92-correction-codex-resident-")
-            .tempdir_in("/tmp")
+            .tempdir_in(std::env::temp_dir())
             .unwrap();
         let r = root.path();
         let codex = r.join("codex");

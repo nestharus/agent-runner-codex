@@ -267,6 +267,40 @@ The app-server shared runtime is not used. Deterministic coverage:
 `tests/codex_resident.rs` (fake `codex`, real provider binary, process-level ACP
 client).
 
+The lock now resolves the delivered SDK 0.3.0 source. Deterministic pairing with
+Runner's registered-provider entry covers accepted stdin/arg/fallback/override
+settings, two turns on one native thread, insertion and tagged end, native
+failure, non-consumption, cancellation with a descendant, owner-loss cancellation
+without rerun, and late endpoint record failure. These tests run the actual
+adapter and Runner with an authored Codex-shaped executable; they establish no
+live native policy, account, model, hardware-crash durability or canonical host
+binding. Runner's binding remains unbound and its publication claims remain
+`not-established`. The delivered Runner conservatively holds even
+`INPUT_NOT_INSERTED` until cancel; it does not authorize resend.
+
+Run the opt-in Python checks with explicit built binaries, a private scratch
+directory whose ancestors satisfy Runner custody, and unprivileged Linux user
+namespaces. Build Runner and its supervisor binaries in the same target directory
+first. `OULIPOLY_PAIRING_SCRATCH` holds all synthetic homes/configuration/stores;
+no installed routes or credentials are used. Keep its path short enough for Unix
+sockets (the owner's socket suffix also consumes the 108-byte Linux limit).
+
+```sh
+OULIPOLY_PAIRING_RUNNER=/absolute/build/oulipoly-agent-runner \
+OULIPOLY_PAIRING_CODEX=/absolute/build/agent-runner-codex \
+OULIPOLY_PAIRING_SCRATCH=/absolute/private/scratch \
+PYTHONDONTWRITEBYTECODE=1 python3 tests/test_runner_sdk_pairing.py -v
+```
+
+Optional `OULIPOLY_PAIRING_EVIDENCE` retains synthetic requests, events, native
+calls and stores. Treat this as test evidence, never a production payload export.
+The endpoint-only checks also run with just `OULIPOLY_PAIRING_CODEX` and scratch.
+They distinguish insertion/dedup/resume from missing launch evidence: the delivered
+SDK refuses uncertain recovery without rerunning. The prior SDK admitted this
+missing-evidence fixture despite declaring the same schema tag. Equal tags alone
+therefore do not establish equal endpoint semantics; dependency revisions and
+test artifact identities are build evidence, not runtime compatibility gates.
+
 ### Host tool mediation (`oulipoly.tool_mediation/v1`)
 
 `describe` advertises `tool_mediation_v1` only when the request's `host.env`
