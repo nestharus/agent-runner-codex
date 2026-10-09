@@ -23,6 +23,10 @@ args = sys.argv[1:]
 prompt = sys.stdin.read()
 with open(os.environ['CALLS'], 'a') as f:
     f.write(json.dumps({'argv': args, 'prompt': prompt, 'home': os.environ.get('CODEX_HOME')}) + '\n')
+if prompt.split()[:1] == ['preident']:
+    # Fails before it reports any thread, as a native failure ahead of its first event would.
+    print(json.dumps({'type': 'error', 'message': 'fixture failure before identity'}), flush=True)
+    sys.exit(1)
 if 'resume' in args:
     thread = args[args.index('resume') + 1]
 else:
@@ -67,13 +71,17 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_codex(FAKE_CODEX)
+    }
+
+    fn with_codex(script: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("u92-correction-codex-resident-")
             .tempdir_in(std::env::temp_dir())
             .unwrap();
         let r = root.path();
         let codex = r.join("codex");
-        executable(&codex, FAKE_CODEX);
+        executable(&codex, script);
         let bash = r.join("bash");
         executable(&bash, "#!/bin/sh\nexit 0\n");
         let mcp = r.join("mcp.ts");
@@ -561,4 +569,77 @@ fn a_changed_configuration_record_is_refused() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("does not match its digest"));
+}
+
+/// A client with one new session over `f`'s resident template.
+fn open_session(f: &Fixture) -> (Client, String) {
+    let prepared = f.prepare();
+    let mut client = f.serve(&prepared);
+    client.call(
+        "initialize",
+        json!({"protocolVersion":2,"info":{"name":"t","version":"0"}}),
+    );
+    let cwd = f.path().join("work");
+    let session = client.call("session/new", json!({"cwd":cwd}))["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (client, session)
+}
+
+/// Native work that ran and failed before reporting any thread leaves its
+/// session identity unknown. The provider must not invent one or let the
+/// session run another turn, because the first one may have had effects.
+#[test]
+fn a_native_failure_before_any_thread_identity_blocks_later_input() {
+    let f = Fixture::new();
+    let (mut client, session) = open_session(&f);
+    let first = client.prompt(&session, "preident", Some("k1"));
+    let first = client.response(first);
+    assert_eq!(first["error"]["code"], json!(-32010), "{first}");
+    let native = &first["error"]["data"]["nativeTurn"];
+    // The native program ran and exited; the result must not say it never started.
+    assert_eq!(
+        native["status"],
+        json!({"kind":"exited","code":1}),
+        "{first}"
+    );
+    assert_eq!(native["terminal_signal"]["kind"], json!("nonzero_exit"));
+    assert_eq!(f.calls().len(), 1);
+
+    let second = client.prompt(&session, "hello", Some("k2"));
+    let second = client.response(second);
+    assert_eq!(second["error"]["code"], json!(-32012), "{second}");
+    assert!(
+        second["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("native session identity is uncertain"),
+        "{second}"
+    );
+    assert_eq!(
+        f.calls().len(),
+        1,
+        "a blocked input must not rerun native work"
+    );
+}
+
+/// A native program the lifecycle observed never starting is not unknown work:
+/// the result says so in the contract's `spawn_error` terms, and the session
+/// stays usable.
+#[test]
+fn a_native_program_that_never_starts_is_reported_so_and_does_not_block() {
+    let f = Fixture::with_codex("#!/nonexistent/interpreter\n");
+    let (mut client, session) = open_session(&f);
+    for (text, key) in [("hello", "k1"), ("again", "k2")] {
+        let turn = client.prompt(&session, text, Some(key));
+        let turn = client.response(turn);
+        // The second input is accepted for a new attempt, not blocked (-32012).
+        assert_eq!(turn["error"]["code"], json!(-32010), "{turn}");
+        let native = &turn["error"]["data"]["nativeTurn"];
+        assert_eq!(native["status"]["kind"], json!("spawn_error"), "{turn}");
+        assert_eq!(native["terminal_signal"]["kind"], json!("spawn_error"));
+        assert_eq!(native["custody"], json!("complete"));
+    }
+    assert!(f.calls().is_empty(), "the fake program never ran");
 }

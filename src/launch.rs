@@ -17,8 +17,9 @@ use agent_provider_execution::{
     framing::FramingError,
     lifecycle::{
         self, Channel, EventSink, LaunchAdapter, LaunchSpec, LifecycleError, LifecycleTiming,
-        NativeCommand, NativeOutcome, OutputFraming, Preparation, Terminal,
+        NativeCommand, NativeOutcome, OutputFraming, Preparation, StartFailure, Terminal,
     },
+    resident::{PROVIDER_SESSION_MARKER, SUBMITTED_USER_TURN_MARKER},
 };
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
@@ -650,6 +651,37 @@ impl LaunchAdapter for CodexLaunch<'_> {
         Ok(())
     }
 
+    /// The gate could not be spawned, or its `exec` of Codex failed: the lifecycle
+    /// observed that native Codex never ran, so this settles as the contract's
+    /// `spawn_error` and the lifecycle records that proof. A Codex that started
+    /// and then failed, with or without a thread identity, never reaches here.
+    fn start_failed<W: Write>(
+        &mut self,
+        failure: &StartFailure,
+        events: &mut EventSink<'_, W>,
+    ) -> Result<Option<Terminal>, ProviderFailure> {
+        let (StartFailure::Spawn(error) | StartFailure::Exec(error)) = failure;
+        if self.output_requested {
+            let mut summary = events.accounting().to_json();
+            summary["protocol"] = json!(LAUNCH_OUTPUT_PROTOCOL);
+            events.marker(LAUNCH_OUTPUT_COMPLETE_MARKER, summary)?;
+        }
+        let status = terminal::ProcessStatus::SpawnError {
+            reason: format!("Failed to start Codex: {error}"),
+        };
+        Ok(Some(Terminal {
+            status: terminal::process_status_json(&status),
+            terminal_signal: terminal::classify_with_failure(
+                &status,
+                now_unix_ms(),
+                None,
+                terminal::host_supports_unavailable(&self.request.host),
+            ),
+            session: Some(json!({"provider_session_id":self.thread_id})),
+            exit_code: terminal::exit_code_for_status(&status),
+        }))
+    }
+
     fn started<W: Write>(&mut self, events: &mut EventSink<'_, W>) -> Result<(), ProviderFailure> {
         let plan = &self.plan;
         events.marker(
@@ -689,14 +721,14 @@ impl LaunchAdapter for CodexLaunch<'_> {
                     publish_session(self.session_path.as_ref().unwrap(), id)?;
                     self.thread_id = Some(id.into());
                     events.marker(
-                        "oulipoly.provider_session",
+                        PROVIDER_SESSION_MARKER,
                         json!({"provider_session_id":id,"source":"codex.exec.json"}),
                     )?;
                 }
             }
             "turn.started" => {
                 if let Some(id) = &self.thread_id {
-                    events.marker("oulipoly.submitted_user_turn", json!({"provider_session_id":id,"prompt_sha256":sha256_hex(self.plan.prompt.as_bytes()),"source":"codex.exec.json"}))?;
+                    events.marker(SUBMITTED_USER_TURN_MARKER, json!({"provider_session_id":id,"prompt_sha256":sha256_hex(self.plan.prompt.as_bytes()),"source":"codex.exec.json"}))?;
                 }
             }
             "item.completed" => {

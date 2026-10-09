@@ -260,7 +260,14 @@ choose the thread (`thread.started`); later turns `resume` it within the same
 account, after the usual transcript ownership check and per-thread lock.
 `turn.started` is the consumption that acknowledges the prompt, each
 `agent_message` item is one ACP `agent_message`, and the turn ends with a tagged
-idle whose stop reason reflects the native outcome. `session/cancel` terminates
+idle whose stop reason reflects the native outcome. The first turn's
+`thread.started` is the only native session identity the provider reports; it
+never chooses one. If Codex ran and failed before reporting a thread, the SDK
+endpoint refuses later input to that session (`-32012`) rather than guess
+whether native work occurred. Only a start the lifecycle observed failing (the
+gate could not be spawned, or its `exec` of Codex failed) is settled here as
+`spawn_error`, which the SDK records as proof that Codex never ran and so leaves
+the session usable. `session/cancel` terminates
 only that turn's process group. Resume of a resident session after provider loss
 discharges the interrupted turn's recorded process group and never reruns it.
 The app-server shared runtime is not used. Deterministic coverage:
