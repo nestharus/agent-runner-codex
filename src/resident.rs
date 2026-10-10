@@ -79,7 +79,7 @@ pub fn prepare(request: &RequestEnvelope) -> Result<Value, ProviderFailure> {
     if !resident_session::FAMILY
         .advertised(
             resident_session::SUPPORTED_VERSIONS,
-            request.host.env.as_ref(),
+            Some(&request.host.env),
         )
         .contains(&1)
     {

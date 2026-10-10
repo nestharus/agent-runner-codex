@@ -1017,8 +1017,10 @@ fn assert_complete_output(events: &[Value]) {
         "oulipoly.launch_output_complete/v1"
     );
     assert_eq!(events.last().unwrap()["kind"], "exit");
-    let schema: Value =
-        serde_json::from_str(include_str!("../contract/v1/launch.schema.json")).unwrap();
+    let schema: Value = serde_json::from_str(
+        agent_provider_contract::schemas::schema_by_file("launch.schema.json").unwrap(),
+    )
+    .unwrap();
     let value_schema = json!({"$ref":"https://contract.test/launch.schema.json#/$defs/LaunchOutputCompleteMarkerValueV1"});
     let validator = jsonschema::JSONSchema::options()
         .with_draft(jsonschema::Draft::Draft202012)
@@ -1031,7 +1033,9 @@ fn assert_complete_output(events: &[Value]) {
 #[test]
 fn extension_capabilities_require_exact_host_selection() {
     let f = Fixture::new();
-    let legacy = f.invoke("describe", &f.request);
+    let mut describe = f.request.clone();
+    describe["params"] = json!({});
+    let legacy = f.invoke("describe", &describe);
     assert!(legacy.1[0]["result"]["capabilities"]
         .get("launch_output_v1")
         .is_none());
@@ -1039,6 +1043,7 @@ fn extension_capabilities_require_exact_host_selection() {
         .get("session_turn_pages_v1")
         .is_none());
     let mut selected = output_request(&f);
+    selected["params"] = json!({});
     selected["host"]["env"]["OULIPOLY_HOST_SESSION_TURN_PAGES_V1"] = json!("1");
     let capabilities = f.invoke("describe", &selected).1[0]["result"]["capabilities"].clone();
     assert_eq!(capabilities["launch_output_v1"], true);
@@ -1064,16 +1069,18 @@ fn output_protocol_is_validated_before_native_admission() {
         "launch_output_not_selected"
     );
     request["host"]["env"]["OULIPOLY_HOST_LAUNCH_OUTPUT_V1"] = json!("1");
+    // Unsupported wire protocol/extra keys fail shared schema admission,
+    // while the valid-but-unselected request above remains adapter-owned.
     request["params"]["output_delivery"]["protocol"] = json!("oulipoly.launch_output/v2");
     assert_eq!(
         f.invoke("launch", &request).1[0]["error"]["code"],
-        "unsupported_launch_output_protocol"
+        "invalid_request"
     );
     request["params"]["output_delivery"] =
         json!({"protocol":"oulipoly.launch_output/v1","extra":true});
     assert_eq!(
         f.invoke("launch", &request).1[0]["error"]["code"],
-        "invalid_launch_output_request"
+        "invalid_request"
     );
     assert!(!f.root.path().join("calls.jsonl").exists());
 }
@@ -1836,4 +1843,38 @@ sys.exit(1)
         assert_eq!(events.last().unwrap()["status"]["kind"], "exited");
         assert_eq!(f.invoke("session.read_turns", &query).1, responses);
     });
+}
+
+#[test]
+fn shared_base_refusals_never_start_the_fake_native_surface() {
+    let f = Fixture::new();
+    let mut refused = Vec::new();
+    let mut candidate = f.request.clone();
+    candidate["host"]["app"] = json!("");
+    refused.push(candidate);
+    let mut candidate = f.request.clone();
+    candidate["params"]["unexpected"] = json!(true);
+    refused.push(candidate);
+    let mut candidate = f.request.clone();
+    candidate["params"]
+        .as_object_mut()
+        .unwrap()
+        .remove("working_directory");
+    refused.push(candidate);
+    let mut candidate = f.request.clone();
+    candidate["provider_instance_id"] = Value::Null;
+    refused.push(candidate);
+    for candidate in refused {
+        let (code, response) = f.invoke("launch", &candidate);
+        assert_eq!(code, 2, "{response:?}");
+        assert_eq!(response[0]["request_id"], "launch-fixture");
+        assert_eq!(response[0]["error"]["category"], "invalid_request");
+        assert_eq!(response[0]["error"]["code"], "invalid_request");
+    }
+    assert!(!f.root.path().join("calls.jsonl").exists());
+    assert!(!f
+        .root
+        .path()
+        .join("data/provider-state/codex/launch")
+        .exists());
 }

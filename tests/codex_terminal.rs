@@ -207,8 +207,10 @@ fn overload_words_in_prose_tool_errors_or_other_native_errors_are_not_classifica
 
 #[test]
 fn selected_and_legacy_failure_signals_match_their_wire_schemas() {
-    let common: Value =
-        serde_json::from_str(include_str!("../contract/v1/common.schema.json")).unwrap();
+    let common: Value = serde_json::from_str(
+        agent_provider_contract::schemas::schema_by_file("common.schema.json").unwrap(),
+    )
+    .unwrap();
     let mut legacy = common.clone();
     legacy["$defs"]["TerminalSignalKind"]["enum"]
         .as_array_mut()

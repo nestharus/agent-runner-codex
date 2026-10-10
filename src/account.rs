@@ -5,8 +5,8 @@ pub const ACCOUNTS: &[&str] = &["codex", "codex2", "codex3", "codex4", "codex5"]
 
 pub fn user_home(host: &HostContext) -> Result<PathBuf, ProviderFailure> {
     host.env
-        .as_ref()
-        .and_then(|env| env.get("HOME").cloned())
+        .get("HOME")
+        .cloned()
         .or_else(|| std::env::var("HOME").ok())
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())

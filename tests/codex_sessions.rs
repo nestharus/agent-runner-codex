@@ -3,7 +3,7 @@ use agent_runner_codex::session;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
@@ -384,20 +384,11 @@ fn export_and_replace_are_explicitly_unsupported() {
 fn session_result_shapes_match_the_provider_contract() {
     let fixture = Fixture::new();
     fixture.write("codex", SESSION, records(SESSION));
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("contract/v1");
-    let session_schema: Value =
-        serde_json::from_slice(&fs::read(root.join("session.schema.json")).unwrap()).unwrap();
-    let common: Value =
-        serde_json::from_slice(&fs::read(root.join("common.schema.json")).unwrap()).unwrap();
-    for (operation, definition, query) in [
-        (
-            "session.locate_transcript",
-            "SessionLocateTranscriptResult",
-            params("codex", SESSION),
-        ),
+    let registry = agent_provider_contract::SchemaRegistry::new();
+    for (operation, query) in [
+        ("session.locate_transcript", params("codex", SESSION)),
         (
             "session.read_turns",
-            "SessionReadTurnsResult",
             json!({"settings_id":"codex","session_id":SESSION,
                 "read_protocol":"oulipoly.session_turn_pages/v1","turn_projection":"canonical_ingest",
                 "start_mode":"beginning","after_token":null,"snapshot_id":null,"page_token":null,
@@ -405,43 +396,24 @@ fn session_result_shapes_match_the_provider_contract() {
         ),
         (
             "session.read_turns",
-            "SessionReadTurnsResult",
             json!({"settings_id":"codex","session_id":SESSION,
                 "read_protocol":"oulipoly.session_turn_pages/v1","turn_projection":"user_observation",
                 "expected_delivery_nonce":"a".repeat(64),
                 "start_mode":"beginning","after_token":null,"snapshot_id":null,"page_token":null,
                 "max_turns":256,"max_response_bytes":524288,"max_source_bytes":8388608,"max_inline_body_bytes":65536}),
         ),
-        (
-            "session.capture",
-            "SessionCaptureResult",
-            params("codex", SESSION),
-        ),
+        ("session.capture", params("codex", SESSION)),
         (
             "session.enumerate",
-            "SessionEnumerateResult",
             json!({"settings_id":"codex","include_cwd":true,"include_turn_count":true}),
         ),
     ] {
-        let schema = json!({"$ref":format!("https://contract.test/session.schema.json#/$defs/{definition}")});
-        let validator = jsonschema::JSONSchema::options()
-            .with_draft(jsonschema::Draft::Draft202012)
-            .with_document(
-                "https://contract.test/session.schema.json".into(),
-                session_schema.clone(),
-            )
-            .with_document(
-                "https://contract.test/common.schema.json".into(),
-                common.clone(),
-            )
-            .compile(&schema)
-            .unwrap();
         let result = fixture.invoke(operation, query);
-        if let Err(errors) = validator.validate(&result) {
-            panic!(
-                "{operation}: {}",
-                errors.map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
-            );
-        };
+        registry
+            .validate_response(
+                operation,
+                &agent_runner_codex::envelope::success_response("session-fixture", result),
+            )
+            .unwrap();
     }
 }

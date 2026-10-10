@@ -33,10 +33,10 @@ must never send the new enum value to a host that did not select it.
 ## Compatibility and provenance
 
 This artifact extends the existing provider/v1 terminal-signal position; it is
-not a second host/provider protocol and does not revise the pinned base snapshot
-under `contract/v1`. The SDK's base schema registry and generated DTOs continue
-to reject `provider_unavailable`; extension-aware consumers must explicitly
-select and compose this artifact into their route's terminal-signal admission.
+not a second host/provider protocol. Active base schemas and DTOs come from
+agent-provider-sdk, whose current base terminal-signal enum includes
+`provider_unavailable`. That structural allowance does not select emission:
+the adapter must still require the current request's explicit host selection.
 The standalone Rust DTO and admission helper are in `terminal_unavailable`.
 
 Consumers can copy this complete extension directory byte-for-byte, recording

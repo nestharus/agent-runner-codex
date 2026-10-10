@@ -1,10 +1,9 @@
 //! Declared roles: formatter, validator, mapper
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 
-pub const CONTRACT: &str = "oulipoly.provider/v1";
+pub use agent_provider_contract::generated::CONTRACT_VERSION as CONTRACT;
+pub use agent_provider_contract::generated::{HostContext, RequestEnvelope};
 pub const MAX_REQUEST_ENVELOPE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_REQUEST_ID_BYTES: usize = 256;
 pub const MAX_PROVIDER_INSTANCE_ID_BYTES: usize = 256;
@@ -20,29 +19,6 @@ pub const CATEGORY_INVALID_REQUEST: &str = "invalid_request";
 pub const CATEGORY_INVALID_SETTINGS: &str = "invalid_settings";
 pub const CATEGORY_CONFLICT: &str = "conflict";
 pub const CATEGORY_FAILED: &str = "failed";
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RequestEnvelope {
-    pub contract: String,
-    pub request_id: String,
-    pub provider_instance_id: Option<String>,
-    pub host: HostContext,
-    pub params: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostContext {
-    pub app: String,
-    pub app_version: Option<String>,
-    pub platform: Option<String>,
-    pub working_directory: Option<String>,
-    pub config_root: Option<String>,
-    pub data_root: Option<String>,
-    pub env: Option<BTreeMap<String, String>>,
-    pub deadline_unix_ms: Option<u64>,
-}
 
 #[derive(Debug)]
 pub struct ProviderFailure {

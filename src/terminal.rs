@@ -9,8 +9,7 @@ pub const HOST_TERMINAL_UNAVAILABLE_ENV: &str = "OULIPOLY_HOST_TERMINAL_UNAVAILA
 
 pub fn host_supports_unavailable(host: &crate::envelope::HostContext) -> bool {
     host.env
-        .as_ref()
-        .and_then(|env| env.get(HOST_TERMINAL_UNAVAILABLE_ENV))
+        .get(HOST_TERMINAL_UNAVAILABLE_ENV)
         .map(String::as_str)
         == Some("1")
 }
