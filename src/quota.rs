@@ -115,9 +115,7 @@ fn probe(
                 .map_err(|_| "Quota output capture unavailable")?,
         )
         .stderr(Stdio::null());
-    if let Some(env) = &request.host.env {
-        command.envs(env);
-    }
+    command.envs(&request.host.env);
     command.env("CODEX_HOME", home);
     #[cfg(unix)]
     {

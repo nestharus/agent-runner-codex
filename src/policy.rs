@@ -216,7 +216,7 @@ fn admit_exploration(
     env: &BTreeMap<String, String>,
     mediation: Option<&ToolMediation>,
 ) -> Result<Option<Exploration>, ProviderFailure> {
-    exploration::admit(request.host.env.as_ref(), Some(env), mediation).map_err(|error| {
+    exploration::admit(Some(&request.host.env), Some(env), mediation).map_err(|error| {
         let code = match error {
             ExplorationError::Invalid(_) => "exploration_invalid",
             ExplorationError::NotSelected => "exploration_not_selected",
@@ -329,10 +329,7 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
             .unwrap_or(json!({})),
     )
     .map_err(|_| invalid("invalid_env", "env must map names to strings"))?;
-    for entries in [Some(&env), request.host.env.as_ref()]
-        .into_iter()
-        .flatten()
-    {
+    for entries in [Some(&env), Some(&request.host.env)].into_iter().flatten() {
         if entries
             .iter()
             .any(|(key, value)| key.is_empty() || key.contains(['=', '\0']) || value.contains('\0'))
@@ -343,7 +340,7 @@ pub fn plan(request: &RequestEnvelope, is_policy: bool) -> Result<Plan, Provider
             ));
         }
     }
-    let mediation = tool_mediation::required_by_host(request.host.env.as_ref(), Some(&env))
+    let mediation = tool_mediation::required_by_host(Some(&request.host.env), Some(&env))
         .map_err(|error| invalid("tool_mediation_invalid", &error.to_string()))?;
     let exploration = admit_exploration(request, &env, mediation.as_ref())?;
     env.insert("CODEX_HOME".into(), codex_home.display().to_string());

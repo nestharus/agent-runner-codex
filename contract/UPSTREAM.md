@@ -1,3 +1,20 @@
+# Historical Codex contract lineage
+
+Active provider/v1 schemas and generated envelope/host DTOs now come from
+`agent-provider-contract` in agent-provider-sdk. SDK operation admission is the
+request boundary and SDK session response admission is the page test oracle.
+The SDK's `contract/v1/UPSTREAM.md` owns current base provenance. The resolved
+Cargo.lock is build evidence, not a peer compatibility key.
+
+The account below describes the former carried snapshot and AGE-347 variant;
+those local base schema files have been removed, not promoted to shared truth.
+Its immutable historical references remain available in Git. In particular,
+the current SDK observation conditional permits unrelated warnings and optional
+accounting below the canonical ceiling, bounds declared digits and disallows
+canonical accounting warnings; the former variant was not equivalent.
+
+## Former carried account (historical, not current authority)
+
 # Contract provenance and local observation extension
 
 These schemas originated as the `contract/v1` product-contract snapshot at

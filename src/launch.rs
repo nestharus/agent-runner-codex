@@ -36,11 +36,7 @@ pub const LAUNCH_OUTPUT_PROTOCOL: &str = "oulipoly.launch_output/v1";
 pub const LAUNCH_OUTPUT_COMPLETE_MARKER: &str = "oulipoly.launch_output_complete/v1";
 
 pub fn host_requested_output(host: &crate::envelope::HostContext) -> bool {
-    host.env
-        .as_ref()
-        .and_then(|env| env.get(HOST_LAUNCH_OUTPUT_ENV))
-        .map(String::as_str)
-        == Some("1")
+    host.env.get(HOST_LAUNCH_OUTPUT_ENV).map(String::as_str) == Some("1")
 }
 
 fn output_requested(request: &RequestEnvelope) -> Result<bool, ProviderFailure> {
@@ -344,7 +340,7 @@ fn admit_mediation(request: &RequestEnvelope, plan: &Plan) -> Result<(), Provide
     let lookup = |name: &str| {
         plan.env
             .get(name)
-            .or_else(|| request.host.env.as_ref().and_then(|env| env.get(name)))
+            .or_else(|| request.host.env.get(name))
             .cloned()
             .or_else(|| std::env::var(name).ok())
     };
@@ -361,8 +357,18 @@ fn admit_mediation(request: &RequestEnvelope, plan: &Plan) -> Result<(), Provide
 }
 
 pub fn run<W: Write>(request: &RequestEnvelope, writer: &mut W) -> Result<i32, ProviderFailure> {
+    run_wire(request, true, writer)
+}
+
+/// Preserve the pre-SDK launch digest's omitted-host-env distinction. This is
+/// custody metadata from the admitted wire, not another admission authority.
+pub(crate) fn run_wire<W: Write>(
+    request: &RequestEnvelope,
+    host_env_present: bool,
+    writer: &mut W,
+) -> Result<i32, ProviderFailure> {
     static NEVER: AtomicBool = AtomicBool::new(false);
-    run_until(request, None, &NEVER, writer)
+    run_until(request, host_env_present, None, &NEVER, writer)
 }
 
 /// One resident turn: the same launch, under the resident session's own launch
@@ -373,11 +379,12 @@ pub(crate) fn run_resident_turn<W: Write>(
     stop: &AtomicBool,
     writer: &mut W,
 ) -> Result<i32, ProviderFailure> {
-    run_until(request, Some(state_root), stop, writer)
+    run_until(request, true, Some(state_root), stop, writer)
 }
 
 fn run_until<W: Write>(
     request: &RequestEnvelope,
+    host_env_present: bool,
     resident_state_root: Option<&Path>,
     stop: &AtomicBool,
     writer: &mut W,
@@ -448,6 +455,7 @@ fn run_until<W: Write>(
     };
     let mut adapter = CodexLaunch {
         request,
+        host_env_present,
         plan,
         config,
         working_directory,
@@ -470,6 +478,7 @@ fn run_until<W: Write>(
 /// translation, and terminal classification.
 struct CodexLaunch<'a> {
     request: &'a RequestEnvelope,
+    host_env_present: bool,
     plan: Plan,
     config: RuntimeConfig,
     working_directory: &'a str,
@@ -492,7 +501,7 @@ impl LaunchAdapter for CodexLaunch<'_> {
         let request = self.request;
         Ok(sha256_hex(
             serde_json::to_vec(&json!({"params":request.params,"config":self.config,
-            "host_env":request.host.env,"host_working_directory":request.host.working_directory,
+            "host_env":self.host_env_present.then_some(&request.host.env),"host_working_directory":request.host.working_directory,
             "account_home":account::home(&request.host, &self.plan.settings_id)?}))
             .unwrap()
             .as_slice(),
@@ -555,9 +564,7 @@ impl LaunchAdapter for CodexLaunch<'_> {
         let mut env: BTreeMap<String, String> = std::env::vars_os()
             .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
             .collect();
-        if let Some(host_env) = &request.host.env {
-            env.extend(host_env.clone());
-        }
+        env.extend(request.host.env.clone());
         // Only the explicit policy-admitted launch environment may carry account
         // instructions; parent process/host environments are stale for this turn.
         env.remove("AGENT_RUNNER_CODEX_DEVELOPER_INSTRUCTIONS");

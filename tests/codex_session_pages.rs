@@ -1332,7 +1332,7 @@ fn age347_observation_keeps_record_ceiling_and_response_bounds_under_exhaustion(
                         let mut canonical_negative = page.clone();
                         canonical_negative["turn_projection"] = json!("canonical_ingest");
                         canonical_negative["warnings"] = json!([]);
-                        assert!(!validator.is_valid(&canonical_negative));
+                        assert!(!page_valid(&validator, &canonical_negative));
                     }
                     assert_page_schema(&validator, &page);
                     assert!(
@@ -1367,26 +1367,26 @@ fn age347_observation_keeps_record_ceiling_and_response_bounds_under_exhaustion(
     }
 }
 
-fn paging_result_schema() -> jsonschema::JSONSchema {
-    let schema: Value =
-        serde_json::from_str(include_str!("../contract/v1/session.schema.json")).unwrap();
-    let common: Value =
-        serde_json::from_str(include_str!("../contract/v1/common.schema.json")).unwrap();
-    jsonschema::JSONSchema::options()
-        .with_draft(jsonschema::Draft::Draft202012)
-        .with_document("https://contract.test/session.schema.json".into(), schema)
-        .with_document("https://contract.test/common.schema.json".into(), common)
-        .compile(&json!({"$ref":"https://contract.test/session.schema.json#/$defs/SessionReadTurnsResult"}))
-        .unwrap()
+fn paging_result_schema() -> agent_provider_contract::SchemaRegistry {
+    agent_provider_contract::SchemaRegistry::new()
 }
 
-fn assert_page_schema(validator: &jsonschema::JSONSchema, page: &Value) {
-    if let Err(errors) = validator.validate(page) {
-        panic!(
-            "page contract: {}",
-            errors.map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
-        );
-    }
+fn page_valid(validator: &agent_provider_contract::SchemaRegistry, page: &Value) -> bool {
+    validator
+        .validate_response(
+            "session.read_turns",
+            &success_response("page-test", page.clone()),
+        )
+        .is_ok()
+}
+
+fn assert_page_schema(validator: &agent_provider_contract::SchemaRegistry, page: &Value) {
+    validator
+        .validate_response(
+            "session.read_turns",
+            &success_response("page-test", page.clone()),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -1400,7 +1400,7 @@ fn observation_result_contract_preserves_projection_specific_native_limits() {
     candidate["source_bytes_examined"] = json!(8_388_608);
     assert_page_schema(&validator, &candidate);
     candidate["source_bytes_examined"] = json!(8_388_609);
-    assert!(!validator.is_valid(&candidate));
+    assert!(!page_valid(&validator, &candidate));
 
     let observation = f.read(observation_params(&f));
     assert_page_schema(&validator, &observation);
@@ -1412,15 +1412,33 @@ fn observation_result_contract_preserves_projection_specific_native_limits() {
         json!(["codex_observation_io_v1:forward=1;reconstruction=8388607;metadata=8388607"]);
     assert_page_schema(&validator, &candidate);
     candidate["source_bytes_examined"] = json!(16_777_216);
-    assert!(!validator.is_valid(&candidate));
+    assert!(!page_valid(&validator, &candidate));
     for total in [json!(-1), json!(1.5)] {
         candidate["source_bytes_examined"] = total;
-        assert!(!validator.is_valid(&candidate));
+        assert!(!page_valid(&validator, &candidate));
     }
+    // SDK permits undeclared accounting only under the canonical byte ceiling,
+    // and permits unrelated warnings alongside one accounting declaration.
+    for warnings in [json!([]), json!(["not accounting"])] {
+        candidate = observation.clone();
+        candidate["warnings"] = warnings;
+        candidate["source_bytes_examined"] = json!(8_388_608);
+        assert_page_schema(&validator, &candidate);
+        candidate["source_bytes_examined"] = json!(8_388_609);
+        assert!(!page_valid(&validator, &candidate));
+    }
+    candidate = observation.clone();
+    candidate["warnings"] = json!([
+        "other warning",
+        "codex_observation_io_v1:forward=1;reconstruction=0;metadata=0"
+    ]);
+    assert_page_schema(&validator, &candidate);
     for warnings in [
-        json!([]),
-        json!(["not accounting"]),
         json!(["codex_observation_io_v1:forward=-1;reconstruction=0;metadata=0"]),
+        json!([
+            "codex_observation_io_v1:forward=123456789012345678901;reconstruction=0;metadata=0"
+        ]),
+        json!(["codex_observation_io_v1:forward=1;reconstruction=0;metadata=0\n"]),
         json!([
             "codex_observation_io_v1:forward=1;reconstruction=0;metadata=0",
             "codex_observation_io_v1:forward=1;reconstruction=0;metadata=0"
@@ -1428,11 +1446,15 @@ fn observation_result_contract_preserves_projection_specific_native_limits() {
     ] {
         candidate = observation.clone();
         candidate["warnings"] = warnings;
-        assert!(!validator.is_valid(&candidate));
+        assert!(!page_valid(&validator, &candidate));
     }
+    candidate = canonical.clone();
+    candidate["warnings"] =
+        json!(["codex_observation_io_v1:forward=1;reconstruction=0;metadata=0"]);
+    assert!(!page_valid(&validator, &candidate));
     candidate = canonical;
     candidate["unexpected"] = json!(true);
-    assert!(!validator.is_valid(&candidate));
+    assert!(!page_valid(&validator, &candidate));
 }
 
 #[test]
@@ -1898,4 +1920,55 @@ fn age355_partial_native_receipt_survives_observer_process_restart() {
         sha256_hex(text.as_bytes())
     );
     assert_eq!(complete, observation_subprocess(&f, &p));
+}
+
+#[test]
+fn emitted_pages_pass_sdk_admission_for_both_projections_and_continuations() {
+    let f = Fixture::new();
+    f.append("user", "first user");
+    f.append("assistant", "assistant reply");
+    f.append("user", "second user");
+    let registry = paging_result_schema();
+    for (projection, expected_roles) in [
+        ("canonical_ingest", vec!["user", "assistant", "user"]),
+        ("user_observation", vec!["user", "user"]),
+    ] {
+        let mut params = f.params();
+        params["turn_projection"] = json!(projection);
+        if projection == "user_observation" {
+            params["expected_delivery_nonce"] = json!("a".repeat(64));
+        }
+        let mut roles = Vec::new();
+        let mut completed = false;
+        // These three native records are the independent fixture intent, not a
+        // snapshot of the page engine. One-turn pages must finish within them.
+        for _ in 0..3 {
+            let request = f.request_value(params.clone());
+            let mut output = Vec::new();
+            let code = agent_runner_codex::write_invocation(
+                &["agent-runner-codex".into(), "session.read_turns".into()],
+                &serde_json::to_vec(&request).unwrap(),
+                &mut output,
+            );
+            let response: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(code, 0, "{response}");
+            registry
+                .validate_response("session.read_turns", &response)
+                .unwrap();
+            let page = &response["result"];
+            for turn in page["turns"].as_array().unwrap() {
+                roles.push(turn["role"].as_str().unwrap().to_owned());
+            }
+            if page["snapshot_complete"] == true {
+                completed = true;
+                break;
+            }
+            params = f.continuation(&params, page);
+        }
+        assert!(
+            completed,
+            "{projection} did not complete the three-record fixture"
+        );
+        assert_eq!(roles, expected_roles);
+    }
 }

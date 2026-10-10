@@ -1,4 +1,4 @@
-//! Versioned external-provider transport copied from the OpenCode contract.
+//! Codex dispatch over SDK-authoritative provider/v1 admission.
 use crate::{
     discovery,
     envelope::{self, ProviderFailure, RequestEnvelope, CONTRACT},
@@ -18,8 +18,7 @@ pub fn describe(host: &crate::envelope::HostContext) -> Value {
     }
     if host
         .env
-        .as_ref()
-        .and_then(|env| env.get("OULIPOLY_HOST_SESSION_TURN_PAGES_V1"))
+        .get("OULIPOLY_HOST_SESSION_TURN_PAGES_V1")
         .map(String::as_str)
         == Some("1")
     {
@@ -29,17 +28,17 @@ pub fn describe(host: &crate::envelope::HostContext) -> Value {
         agent_provider_contract::resident_session::advertise(
             capabilities,
             agent_provider_contract::resident_session::SUPPORTED_VERSIONS,
-            host.env.as_ref(),
+            Some(&host.env),
         );
         agent_provider_contract::tool_mediation::advertise(
             capabilities,
             agent_provider_contract::tool_mediation::SUPPORTED_VERSIONS,
-            host.env.as_ref(),
+            Some(&host.env),
         );
         agent_provider_contract::exploration::advertise(
             capabilities,
             agent_provider_contract::exploration::SUPPORTED_VERSIONS,
-            host.env.as_ref(),
+            Some(&host.env),
         );
     }
     result
@@ -59,27 +58,34 @@ pub fn write_invocation<W: Write>(args: &[String], input: &[u8], writer: &mut W)
                 "Request exceeds 4 MiB",
             ));
         }
-        let request: RequestEnvelope = serde_json::from_slice(input).map_err(|_| {
+        let instance: Value = serde_json::from_slice(input).map_err(|_| {
             ProviderFailure::invalid_request(
                 "",
                 "invalid_request",
                 "Expected a provider request JSON envelope",
             )
         })?;
-        request_id.clone_from(&request.request_id);
-        if request.contract != CONTRACT
-            || request.request_id.is_empty()
-            || request.request_id.len() > envelope::MAX_REQUEST_ID_BYTES
-        {
+        request_id = instance["request_id"].as_str().unwrap_or("").to_owned();
+        let operation = args.get(1).map(String::as_str).unwrap_or("");
+        admit_request(operation, &instance)?;
+        let host_env_present = instance["host"].get("env").is_some();
+        let request: RequestEnvelope = serde_json::from_value(instance).map_err(|_| {
+            ProviderFailure::invalid_request(
+                "",
+                "invalid_request",
+                "Request cannot be represented by SDK DTOs",
+            )
+        })?;
+        // Adapter custody/resource bound, in addition to shared wire admission.
+        if request.request_id.len() > envelope::MAX_REQUEST_ID_BYTES {
             return Err(ProviderFailure::invalid_request(
                 "",
                 "invalid_envelope",
-                "Contract or request ID is invalid",
+                "Request ID exceeds the adapter's 256-byte bound",
             ));
         }
-        let operation = args.get(1).map(String::as_str).unwrap_or("");
         if operation == "launch" {
-            return launch::run(&request, writer);
+            return launch::run_wire(&request, host_env_present, writer);
         }
         let result = match operation {
             "describe" => describe(&request.host),
@@ -135,4 +141,30 @@ pub fn write_invocation<W: Write>(args: &[String], input: &[u8], writer: &mut W)
             error.exit_code
         }
     }
+}
+
+/// The SDK owns every base operation's wire shape. Extension operations retain
+/// that same envelope; their params are admitted by their SDK extension API.
+fn admit_request(operation: &str, instance: &Value) -> Result<(), ProviderFailure> {
+    let registry = agent_provider_contract::SchemaRegistry::new();
+    let result = if registry.schema_for_subcommand(operation).is_some() {
+        registry.validate_request(operation, instance)
+    } else {
+        // Describe has empty params over the common envelope. Substitute only
+        // params to admit that envelope without inventing an extension schema.
+        let mut envelope = instance.clone();
+        if let Some(object) = envelope.as_object_mut() {
+            if object.contains_key("params") {
+                object.insert("params".into(), json!({}));
+            }
+        }
+        registry.validate_request("describe", &envelope)
+    };
+    result.map_err(|_| {
+        ProviderFailure::invalid_request(
+            "",
+            "invalid_request",
+            "Request does not satisfy the SDK provider/v1 contract",
+        )
+    })
 }

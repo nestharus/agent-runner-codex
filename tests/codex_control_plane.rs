@@ -1,6 +1,5 @@
 use agent_runner_codex::write_invocation;
 use serde_json::{json, Value};
-use std::{fs, path::Path};
 
 #[test]
 fn discovery_registers_exact_efforts_models_and_accounts() {
@@ -86,74 +85,19 @@ fn discovery_registers_exact_efforts_models_and_accounts() {
 }
 
 #[test]
-fn control_plane_responses_match_the_copied_host_contracts() {
+fn control_plane_responses_match_sdk_operation_contracts() {
     let temporary = tempfile::tempdir().unwrap();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("contract/v1");
-    let common: Value =
-        serde_json::from_slice(&fs::read(root.join("common.schema.json")).unwrap()).unwrap();
-    for (operation, schema_file, definition, params) in [
-        (
-            "describe",
-            "describe.schema.json",
-            "DescribeResult",
-            json!({}),
-        ),
-        (
-            "discovery.models",
-            "discovery.schema.json",
-            "DiscoveryModelsResult",
-            json!({}),
-        ),
-        (
-            "discovery.accounts",
-            "discovery.schema.json",
-            "DiscoveryAccountsResult",
-            json!({}),
-        ),
-        (
-            "setup.detect",
-            "setup.schema.json",
-            "SetupDetectResult",
-            json!({}),
-        ),
-        (
-            "setup.install_plan",
-            "setup.schema.json",
-            "SetupInstallPlanResult",
-            json!({}),
-        ),
-        (
-            "setup.sync_plan",
-            "setup.schema.json",
-            "SetupSyncPlanResult",
-            json!({}),
-        ),
-        (
-            "quota.source",
-            "quota.schema.json",
-            "QuotaSourceResult",
-            json!({"settings_id":"codex"}),
-        ),
-        (
-            "quota.probe",
-            "quota.schema.json",
-            "QuotaProbeResult",
-            json!({"settings_id":"codex"}),
-        ),
+    let registry = agent_provider_contract::SchemaRegistry::new();
+    for (operation, params) in [
+        ("describe", json!({})),
+        ("discovery.models", json!({})),
+        ("discovery.accounts", json!({})),
+        ("setup.detect", json!({})),
+        ("setup.install_plan", json!({})),
+        ("setup.sync_plan", json!({})),
+        ("quota.source", json!({"settings_id":"codex"})),
+        ("quota.probe", json!({"settings_id":"codex"})),
     ] {
-        let contract: Value =
-            serde_json::from_slice(&fs::read(root.join(schema_file)).unwrap()).unwrap();
-        let selected_schema =
-            json!({"$ref":format!("https://contract.test/{schema_file}#/$defs/{definition}")});
-        let validator = jsonschema::JSONSchema::options()
-            .with_draft(jsonschema::Draft::Draft202012)
-            .with_document(format!("https://contract.test/{schema_file}"), contract)
-            .with_document(
-                "https://contract.test/common.schema.json".into(),
-                common.clone(),
-            )
-            .compile(&selected_schema)
-            .unwrap();
         for selected in [false, true] {
             let env = if selected {
                 json!({"HOME":temporary.path(),"OULIPOLY_HOST_LAUNCH_OUTPUT_V1":"1","OULIPOLY_HOST_SESSION_TURN_PAGES_V1":"1"})
@@ -169,12 +113,107 @@ fn control_plane_responses_match_the_copied_host_contracts() {
             );
             let response: Value = serde_json::from_slice(&output).unwrap();
             assert_eq!(code, 0, "{operation}: {response}");
-            if let Err(errors) = validator.validate(&response["result"]) {
-                panic!(
-                    "{operation}: {}",
-                    errors.map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
-                );
-            };
+            registry.validate_response(operation, &response).unwrap();
         }
+    }
+}
+
+fn invoke_contract(operation: &str, request: &Value) -> (i32, Value) {
+    let mut output = Vec::new();
+    let code = write_invocation(
+        &["agent-runner-codex".into(), operation.into()],
+        &serde_json::to_vec(request).unwrap(),
+        &mut output,
+    );
+    (code, serde_json::from_slice(&output).unwrap())
+}
+
+#[test]
+fn base_admission_enforces_describe_intent_and_preserves_request_identity() {
+    // Independent provider/v1 intent: describe is an empty-object query; host
+    // app and request_id need characters, not non-whitespace content. Optional
+    // string fields are omitted, not null, and unknown properties are refused.
+    let request = json!({"contract":"oulipoly.provider/v1","request_id":"admission-id",
+        "host":{"app":"contract-test"},"params":{}});
+    for (app, id) in [("contract-test", "admission-id"), (" ", " "), ("test", "é")] {
+        let mut accepted = request.clone();
+        accepted["host"]["app"] = json!(app);
+        accepted["request_id"] = json!(id);
+        let (code, response) = invoke_contract("describe", &accepted);
+        assert_eq!(code, 0, "{response}");
+        assert_eq!(response["request_id"], id);
+        assert_eq!(response["ok"], true);
+    }
+    let mut refused = Vec::new();
+    for params in [Value::Null, json!(1), json!([]), json!({"unused":true})] {
+        let mut candidate = request.clone();
+        candidate["params"] = params;
+        refused.push(candidate);
+    }
+    for (pointer, value) in [
+        ("/host/app", json!("")),
+        ("/host/app_version", Value::Null),
+        ("/host/env", Value::Null),
+        ("/host/unrecognized", json!(true)),
+        ("/provider_instance_id", Value::Null),
+        ("/contract", json!("oulipoly.provider/v2")),
+    ] {
+        let (parent, name) = pointer.rsplit_once('/').unwrap();
+        let mut candidate = request.clone();
+        candidate
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(name.into(), value);
+        refused.push(candidate);
+    }
+    for candidate in refused {
+        let (code, response) = invoke_contract("describe", &candidate);
+        assert_eq!(code, 2, "{candidate}: {response}");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["request_id"], "admission-id");
+        assert_eq!(response["error"]["category"], "invalid_request");
+    }
+}
+
+#[test]
+fn sdk_operation_params_are_admitted_before_adapter_work() {
+    // A scalar is not a query/launch/policy/session params object. These
+    // requests must not reach configuration, account, filesystem or native work.
+    for operation in [
+        "describe",
+        "discovery.models",
+        "discovery.accounts",
+        "policy.evaluate",
+        "launch",
+        "terminal.classify",
+        "quota.source",
+        "session.read_turns",
+        "setup.detect",
+    ] {
+        let request = json!({"contract":"oulipoly.provider/v1","request_id":"before-adapter",
+            "host":{"app":"contract-test"},"params":42});
+        let (code, response) = invoke_contract(operation, &request);
+        assert_eq!(code, 2, "{operation}: {response}");
+        assert_eq!(response["request_id"], "before-adapter");
+        assert_eq!(response["error"]["code"], "invalid_request");
+    }
+}
+
+#[test]
+fn resident_extension_keeps_shared_envelope_admission() {
+    for missing_params in [false, true] {
+        let mut request = json!({"contract":"oulipoly.provider/v1","request_id":"resident-envelope",
+            "host":{"app":"contract-test"},"params":{}});
+        if missing_params {
+            request.as_object_mut().unwrap().remove("params");
+        } else {
+            request["host"]["app"] = json!("");
+        }
+        let (code, response) = invoke_contract("resident.prepare", &request);
+        assert_eq!(code, 2, "{response}");
+        assert_eq!(response["request_id"], "resident-envelope");
+        assert_eq!(response["error"]["code"], "invalid_request");
     }
 }

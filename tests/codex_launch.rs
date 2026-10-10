@@ -56,7 +56,27 @@ for event in [{'type':'thread.started','thread_id':'11111111-2222-3333-4444-5555
                 "argv":["codex2","exec","--dangerously-bypass-approvals-and-sandbox","-m","gpt-6-astra","-c","model_reasoning_effort=\"high\""],"working_directory":r,"env":{}}});
         Self { root, request }
     }
+    // Native-semantic controls must reach the adapter, not pass on a wire refusal.
     fn invoke(&self, operation: &str, request: &Value) -> (i32, Vec<Value>) {
+        let registry = agent_provider_contract::SchemaRegistry::new();
+        registry.validate_request(operation, request).unwrap();
+        let result = self.invoke_wire(operation, request);
+        if operation == "policy.evaluate" {
+            assert_eq!(result.0, 0, "{:?}", result.1);
+            assert_eq!(result.1.len(), 1);
+            registry.validate_response(operation, &result.1[0]).unwrap();
+        }
+        result
+    }
+
+    fn invoke_invalid(&self, operation: &str, request: &Value) -> (i32, Vec<Value>) {
+        assert!(agent_provider_contract::SchemaRegistry::new()
+            .validate_request(operation, request)
+            .is_err());
+        self.invoke_wire(operation, request)
+    }
+
+    fn invoke_wire(&self, operation: &str, request: &Value) -> (i32, Vec<Value>) {
         let mut output = Vec::new();
         let code = write_invocation(
             &["agent-runner-codex".into(), operation.into()],
@@ -91,7 +111,20 @@ fn model_request(f: &Fixture, label: &str, model: &str, effort: &str) -> Value {
     ];
     argv.extend(args.as_array().unwrap().iter().cloned());
     request["params"]["argv"] = json!(argv);
-    request["params"]["launch"] = json!({"argv": argv, "env": {}});
+    request
+}
+
+// SDK policy params contain a candidate launch, rather than launch's top-level
+// argv/working_directory/env. Keep the two operations' wire fixtures distinct.
+fn policy_request(launch_request: &Value) -> Value {
+    let mut request = launch_request.clone();
+    let params = &launch_request["params"];
+    request["params"] = json!({
+        "settings_id": params["settings_id"],
+        "mode": params["mode"],
+        "model": params["model"],
+        "launch": {"argv": params["argv"], "env": params["env"]}
+    });
     request
 }
 
@@ -119,7 +152,7 @@ fn gpt_alias_rejects_old_sol_or_non_high_effort_before_spawn() {
     for (model, effort) in [("gpt-6-sol", "high"), ("gpt-6.1-sol", "xhigh")] {
         let f = Fixture::new();
         let request = model_request(&f, "gpt", model, effort);
-        let (_, response) = f.invoke("policy.evaluate", &request);
+        let (_, response) = f.invoke("policy.evaluate", &policy_request(&request));
         assert_eq!(response[0]["result"]["accepted"], false);
         assert_eq!(
             response[0]["result"]["diagnostics"][0]["code"],
@@ -135,15 +168,15 @@ fn gpt_alias_rejects_old_sol_or_non_high_effort_before_spawn() {
 fn assert_model_launch(label: &str, model: &str, effort: &str) {
     let f = Fixture::new();
     let request = model_request(&f, label, model, effort);
-    let (code, response) = f.invoke("policy.evaluate", &request);
+    let (code, response) = f.invoke("policy.evaluate", &policy_request(&request));
     assert_eq!(code, 0);
     assert_eq!(
         response[0]["result"]["accepted"], true,
         "{label}: {response:?}"
     );
     assert_eq!(
-        response[0]["result"]["markers"][0]["value"]["effort"],
-        effort
+        response[0]["result"]["markers"][0]["value"],
+        json!({"account": "codex2", "model": model, "effort": effort})
     );
     let (code, events) = f.invoke("launch", &request);
     assert_eq!(code, 0, "{label}: {events:?}");
@@ -182,7 +215,7 @@ fn assert_stale_astra_rejected(effort: &str) {
     let f = Fixture::new();
     let label = format!("gpt-{effort}");
     let mut request = model_request(&f, &label, "gpt-6-astra", effort);
-    let (_, response) = f.invoke("policy.evaluate", &request);
+    let (_, response) = f.invoke("policy.evaluate", &policy_request(&request));
     assert_eq!(
         response[0]["result"]["accepted"], false,
         "{label}: {response:?}"
@@ -201,7 +234,7 @@ fn assert_stale_astra_rejected(effort: &str) {
         "-c",
         format!("model_reasoning_effort=\"{effort}\"")
     ]);
-    let (_, response) = f.invoke("policy.evaluate", &request);
+    let (_, response) = f.invoke("policy.evaluate", &policy_request(&request));
     assert_eq!(response[0]["result"]["accepted"], false);
     assert_eq!(
         response[0]["result"]["diagnostics"][0]["code"],
@@ -242,8 +275,7 @@ fn named_model_families_pass_policy_and_launch_with_managed_tools_in_every_accou
                 ];
                 argv.extend(model_args.as_array().unwrap().iter().cloned());
                 request["params"]["argv"] = json!(argv);
-                let mut admission = request.clone();
-                admission["params"]["launch"] = json!({"argv": argv, "env": {}});
+                let admission = policy_request(&request);
                 let (code, response) = f.invoke("policy.evaluate", &admission);
                 assert_eq!(code, 0, "{account}/gpt-{family}-{effort}: {response:?}");
                 assert_eq!(response[0]["result"]["accepted"], true, "{response:?}");
@@ -382,8 +414,7 @@ fn named_model_families_reject_ultra_and_cross_model_or_effort_arguments() {
             ];
             argv.extend(args.as_array().unwrap().iter().cloned());
             request["params"]["argv"] = json!(argv);
-            let mut admission = request.clone();
-            admission["params"]["launch"] = json!({"argv": argv, "env": {}});
+            let admission = policy_request(&request);
             let (code, response) = f.invoke("policy.evaluate", &admission);
             assert_eq!(code, 0);
             assert_eq!(response[0]["result"]["accepted"], false);
@@ -834,7 +865,7 @@ print(json.dumps({'type':'turn.completed'}),flush=True)"#,
         );
         let mut request = f.request.clone();
         request["host"]["env"][CARRIER] = json!("stale host instructions");
-        let mut admission = request.clone();
+        let mut admission = policy_request(&request);
         admission["params"]["launch"] =
             json!({"argv":request["params"]["argv"],"env":{CARRIER:"stale incoming carrier"}});
         if let Some(value) = selected {
@@ -1017,8 +1048,10 @@ fn assert_complete_output(events: &[Value]) {
         "oulipoly.launch_output_complete/v1"
     );
     assert_eq!(events.last().unwrap()["kind"], "exit");
-    let schema: Value =
-        serde_json::from_str(include_str!("../contract/v1/launch.schema.json")).unwrap();
+    let schema: Value = serde_json::from_str(
+        agent_provider_contract::schemas::schema_by_file("launch.schema.json").unwrap(),
+    )
+    .unwrap();
     let value_schema = json!({"$ref":"https://contract.test/launch.schema.json#/$defs/LaunchOutputCompleteMarkerValueV1"});
     let validator = jsonschema::JSONSchema::options()
         .with_draft(jsonschema::Draft::Draft202012)
@@ -1031,7 +1064,9 @@ fn assert_complete_output(events: &[Value]) {
 #[test]
 fn extension_capabilities_require_exact_host_selection() {
     let f = Fixture::new();
-    let legacy = f.invoke("describe", &f.request);
+    let mut describe = f.request.clone();
+    describe["params"] = json!({});
+    let legacy = f.invoke("describe", &describe);
     assert!(legacy.1[0]["result"]["capabilities"]
         .get("launch_output_v1")
         .is_none());
@@ -1039,6 +1074,7 @@ fn extension_capabilities_require_exact_host_selection() {
         .get("session_turn_pages_v1")
         .is_none());
     let mut selected = output_request(&f);
+    selected["params"] = json!({});
     selected["host"]["env"]["OULIPOLY_HOST_SESSION_TURN_PAGES_V1"] = json!("1");
     let capabilities = f.invoke("describe", &selected).1[0]["result"]["capabilities"].clone();
     assert_eq!(capabilities["launch_output_v1"], true);
@@ -1064,16 +1100,18 @@ fn output_protocol_is_validated_before_native_admission() {
         "launch_output_not_selected"
     );
     request["host"]["env"]["OULIPOLY_HOST_LAUNCH_OUTPUT_V1"] = json!("1");
+    // Unsupported wire protocol/extra keys fail shared schema admission,
+    // while the valid-but-unselected request above remains adapter-owned.
     request["params"]["output_delivery"]["protocol"] = json!("oulipoly.launch_output/v2");
     assert_eq!(
-        f.invoke("launch", &request).1[0]["error"]["code"],
-        "unsupported_launch_output_protocol"
+        f.invoke_invalid("launch", &request).1[0]["error"]["code"],
+        "invalid_request"
     );
     request["params"]["output_delivery"] =
         json!({"protocol":"oulipoly.launch_output/v1","extra":true});
     assert_eq!(
-        f.invoke("launch", &request).1[0]["error"]["code"],
-        "invalid_launch_output_request"
+        f.invoke_invalid("launch", &request).1[0]["error"]["code"],
+        "invalid_request"
     );
     assert!(!f.root.path().join("calls.jsonl").exists());
 }
@@ -1836,4 +1874,38 @@ sys.exit(1)
         assert_eq!(events.last().unwrap()["status"]["kind"], "exited");
         assert_eq!(f.invoke("session.read_turns", &query).1, responses);
     });
+}
+
+#[test]
+fn shared_base_refusals_never_start_the_fake_native_surface() {
+    let f = Fixture::new();
+    let mut refused = Vec::new();
+    let mut candidate = f.request.clone();
+    candidate["host"]["app"] = json!("");
+    refused.push(candidate);
+    let mut candidate = f.request.clone();
+    candidate["params"]["unexpected"] = json!(true);
+    refused.push(candidate);
+    let mut candidate = f.request.clone();
+    candidate["params"]
+        .as_object_mut()
+        .unwrap()
+        .remove("working_directory");
+    refused.push(candidate);
+    let mut candidate = f.request.clone();
+    candidate["provider_instance_id"] = Value::Null;
+    refused.push(candidate);
+    for candidate in refused {
+        let (code, response) = f.invoke_invalid("launch", &candidate);
+        assert_eq!(code, 2, "{response:?}");
+        assert_eq!(response[0]["request_id"], "launch-fixture");
+        assert_eq!(response[0]["error"]["category"], "invalid_request");
+        assert_eq!(response[0]["error"]["code"], "invalid_request");
+    }
+    assert!(!f.root.path().join("calls.jsonl").exists());
+    assert!(!f
+        .root
+        .path()
+        .join("data/provider-state/codex/launch")
+        .exists());
 }

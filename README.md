@@ -4,8 +4,10 @@ Temporary Codex provider for Agent Runner's `oulipoly.provider/v1` contract.
 The repository starts with a complete copy of `agent-runner-opencode`; the exact
 source revision is recorded in `OPENCODE_BASELINE` and the baseline Git commit.
 `OPENCODE_CONTRACT_REVISION` records the imported OpenCode contract revision,
-not an attestation of the currently installed Runner. `contract/v1/UPSTREAM.md`
-identifies the historical shared snapshot and the local observation extension.
+not an attestation of the currently installed Runner. `contract/UPSTREAM.md`
+retains the historical copied snapshot/observation account. Active base schemas,
+envelope/host DTOs and operation admission come from `agent-provider-contract`
+in agent-provider-sdk; tests use that same SDK authority, not local base copies.
 The active adapter retains the shared envelope, contract lineage, encoding,
 terminal classification, durable filesystem helpers, and native process gate.
 Codex-specific launch and rollout handling replace OpenCode's native boundaries.
@@ -672,15 +674,16 @@ codex_observation_io_v1:forward=<decimal>;reconstruction=<decimal>;metadata=<dec
 The three counts sum to `source_bytes_examined`; `forward + metadata <=
 max_source_bytes`, and `reconstruction < 8388608`. Hosts must validate this
 observation envelope rather than applying the canonical total-source check to
-it. The provider-carried `contract/v1/session.schema.json` applies an observation
-maximum of 16,777,215 (maximum quantum plus maximum prefix) and requires the
-accounting-warning shape; it retains the canonical maximum of 8,388,608.
-JSON Schema constrains structure, not category-sum/per-request arithmetic: hosts
-must enforce both. This is a **local provider extension**, not a claim of
-upstream adoption; `contract/v1/UPSTREAM.md` retains immutable historical
-snapshot references and hashes. A paired consumer's actual schema must also
-accept this extension before use. Existing v1 fields carry the exchange, and
-hosts must continue treating cursors as opaque. Reconstruction is **native I/O**, never
+it. The shared SDK session schema permits declared observation accounting up to
+16,777,215 bytes (maximum quantum plus maximum prefix), while canonical pages
+retain the 8,388,608 ceiling and cannot carry the accounting prefix. Undeclared
+observation accounting stays under that same canonical ceiling. A declared
+accounting warning must be unique, use 1–20 digits per category, and contain no
+CR/LF; unrelated warnings may coexist. Codex emits its own accounting categories
+within those shared constraints. JSON Schema does not prove category sums or
+per-request arithmetic: hosts must enforce both. `contract/UPSTREAM.md` retains
+historical references rather than a second base schema authority. Existing v1
+fields carry the exchange, and hosts must continue treating cursors as opaque. Reconstruction is **native I/O**, never
 staging I/O. All reads count even if turn/response limits cause bytes to be read
 again next call. Record assembly remains at most 8 MiB per call; response, turn,
 inline-body and discovery ceilings are unchanged. Repeated small-quantum reads
