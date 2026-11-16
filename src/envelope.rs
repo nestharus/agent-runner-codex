@@ -24,7 +24,7 @@ pub const CATEGORY_FAILED: &str = "failed";
 pub struct ProviderFailure {
     pub request_id: String,
     pub category: &'static str,
-    pub code: &'static str,
+    pub code: String,
     pub message: String,
     pub details: Value,
     pub retryable: bool,
@@ -167,7 +167,7 @@ pub fn failure_response(failure: &ProviderFailure) -> Value {
     error_response(
         &failure.request_id,
         failure.category,
-        failure.code,
+        &failure.code,
         &failure.message,
         failure.details.clone(),
         failure.retryable,
@@ -186,7 +186,7 @@ fn provider_failure(
     ProviderFailure {
         request_id: request_id.into(),
         category,
-        code,
+        code: code.into(),
         message: message.into(),
         details,
         retryable,

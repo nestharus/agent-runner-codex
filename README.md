@@ -500,157 +500,100 @@ with `--standard-labels` after installing the updated provider. Installing an
 updated provider and routing affects new PTY launches; an already-running Codex
 session keeps the tool inventory with which it started.
 
-### Bounded JSONL record continuation (AGE-343)
+### Shared SDK session-turn paging
 
-Canonical session-turn paging keeps the caller's existing source/response/inline/turn
-budgets, including for old `codex-stp1-` continuations. The observation-only
-resource change below supersedes this native/staging accounting for that projection. It can stage a partial
-record across source quanta rather than requiring a whole record to fit the
-remaining quantum. No record is skipped based on an unparsed type prefix.
-Projection, turn IDs (original record byte offsets), sequence and body digests
-are computed only after a complete JSONL record is parsed. Oversized projected
-bodies retain the existing `omitted_oversize` metadata/digest contract.
+Production `session.read_turns` v1 paging calls
+`agent_provider_execution::session_pages::read_turns` with the Codex native
+adapter. The SDK owns scanning, prefix verification, staging/admission, cursors,
+HMAC observation tokens, response fitting, body hashes and accounting. Codex owns
+account/rollout discovery, first-record session identification, message extraction,
+timestamp normalization and observation eligibility. The retired provider-private
+generic paging engine is removed; host ingest, admission, leases and checkpoints
+remain Runner's responsibility. Cargo resolves the shared SDK normally, without a
+manifest revision constraint. The lock records build resolution, not runtime
+compatibility: declared wire schemas and capabilities govern compatibility.
+
+Native projection retains user/assistant text, `session:byte:offset` IDs, null
+parents, false sidechain/compaction flags and false `source_final`. These are
+**provisional, unqualified adapter claims**, not established native-format facts,
+logical-identity continuity or compaction evidence. Shape admission and synthetic
+fixtures do not qualify those claims. Page-field assertion meanings and native
+truth remain separate work; this adoption selects no new default or capability.
+
+Canonical pages preserve the caller's source/response/inline/turn budgets. A
+record can span source quanta, but is parsed/projected only after its newline.
+The SDK compares a retained prefix in full with the native source before assembly,
+and validates its staged copy. Canonical verification uses the same source quantum
+as forward reads; genuine verification progress can return an empty, incomplete
+`scan_progress` page with a changed token. Each prefix extension restarts full
+verification. Catch-up can therefore take many more calls and native bytes than a
+single pass (roughly quadratic in record-size/quantum). The exact 8 MiB neighbor
+fixture at a 1 MiB quantum now permits up to 64 pages instead of the historical
+12-page test guard; this is acceptance of higher catch-up cost, **not** a public
+latency guarantee or an unchanged-12 pass. Source-stamp growth, including append,
+can restart verification, so continuously changing large prefixes may not settle.
 
 Resource envelope:
 
-- Native source reads, including identity metadata, stay within the requested
-  source quota (at most 8 MiB; Runner currently supplies 1 MiB). Identity scanning
-  uses a one-byte buffer to avoid uncharged read-ahead: at most the source quota
-  in header-read calls. This deliberately trades header syscall overhead for
-  exact accounting. Native record reads remain chunked.
-- A newline-complete record may contain at most 8,388,608 bytes. A prefix without
-  a newline at that ceiling returns `session_turn_record_ceiling_exceeded`,
-  never completion or a silent skip. Metadata that cannot leave any work budget
-  and insufficient response metadata capacity use
-  `session_turn_page_budget_too_small`. Hosts must stop unchanged-input retries
-  for these deterministic limits; raising budgets invalidates old page tokens.
-- Framing assembles at most 8 MiB of record/page bytes per call. Immutable staging
-  reads are separate from **native** source accounting: at most one prefix
-  below 8 MiB, plus at most one same-sized collision-validation read; cursor
-  JSON is limited to 32 KiB per frame; packed cursor lookup streams a hash bucket
-  under the storage-budget bound described below. Prefix staging writes less than
-  8 MiB per call.
-  Buffer allocation capacity may exceed logical byte length; JSON/projection
-  allocations are additionally proportional to this bounded record. This is
-  not a measured or allocator-enforced whole-process RSS cap.
-- At most 256 turns, 524,288 response bytes and 65,536 inline body bytes remain
-  supported; JSON parsing retains serde_json's depth limit. Work is bounded by
-  these limits, the paging-store budget, and directory discovery limits (100,000 rollouts,
-  400,000 entries), not the entire transcript length. Staging can reread/hash a
-  prefix on each quantum; total catch-up work is not claimed to be single-pass.
+- Canonical native reads, including identity metadata and verification, remain
+  within `max_source_bytes` (at most 8 MiB). Header reads use a one-byte buffer to
+  avoid uncharged read-ahead; record reads remain chunked.
+- A newline-complete record may contain at most 8,388,608 bytes. An unfinished
+  prefix at that ceiling returns `session_turn_record_ceiling_exceeded`, never a
+  silent skip. Insufficient metadata/response/work capacity returns
+  `session_turn_page_budget_too_small`. Stop unchanged-input retries for these
+  deterministic limits; changing budgets invalidates old tokens.
+- Record assembly is bounded by 8 MiB per call. Local staged-prefix reads/hashes
+  are separate from native accounting and may repeat per visit. Cursor frames
+  are bounded by 32 KiB; bucket lookup is bounded by the retained pool, not the
+  native quantum. JSON/projection and buffer allocation add memory beyond logical
+  bytes. No measured whole-process RSS or single-pass guarantee is made.
+- At most 256 turns, 524,288 response bytes and 65,536 inline body bytes are
+  supported. Oversize bodies preserve omission metadata and exact digests.
+  Directory discovery retains 100,000-rollout/400,000-entry limits.
 
-Staging lives beside private provider-owned paging cursors as immutable,
-content-addressed `record-<sha256>.part` files, published and synchronized before
-any referring cursor. Tokens bind the staging digest, record start, account,
-provider, settings, session, projection, nonce, budgets and existing file
-identity checks. Interrupted calls may leave unreferenced staging files; do not
-manually remove staging while a retained cursor may reference it. There is no
-new automatic garbage collection or replay eviction. New allocations are bounded
-by the paging-state admission limits below; already-retained content, including
-content above those limits, is preserved and charged to admission.
+Incomplete frozen EOF means the partial record was not projected, not that the
+live session stopped. A resume token retains the prefix for a later suffix.
+Device/inode, first-record and bounded resume-anchor checks detect certain
+replacement/truncation/rewrites, not arbitrary changes to already delivered
+history or a coherent concurrent snapshot. Canonical catch-up does not recreate
+native model context or settle a native UI/history complaint.
 
-At incomplete EOF, snapshot completion means all currently frozen bytes were
-examined, **not** that the partial record was projected or that the live session
-has stopped. The resume token retains that prefix; append supplies its suffix.
-Neither this result nor `last_success_at` proves current native/model-context
-coverage. Existing inode/truncation/mtime checks remain in force; same-inode
-rewrites combined with file growth are not newly content-attested.
+### New paging namespace, admission and no legacy migration
 
-Upgrade accepts legacy cursors without staging fields. Downgrade compatibility
-is not symmetric: an older provider rejects new cursors that contain a staged
-prefix. A binary-only rollback after checkpoint advancement is therefore unsafe;
-retain the compatible reader and its provider-state with the checkpoint, or
-obtain a separately reviewed rollback/reconciliation plan. Never reset a native
-session, rewrite native records, or manually advance a production cursor to
-bypass this boundary. Canonical catch-up does not reconstruct native model
-context or settle a native UI/history complaint.
+New state is under
+`host.data_root/provider-state/codex-shared/session-pages-v1` (or the default
+`~/.local/share/agent-runner-codex` data root). Canonical tokens start
+`codex-shared-stp2-`; observation tokens start `codex-shared-obs1-`. These are
+opaque to hosts. Old private `codex-stp1-`/`codex-obs1-` tokens are refused with
+`session_turn_page_token_stale`, not decoded, migrated, reset or upgraded. Old
+`provider-state/codex` files are neither consumed nor deleted and are outside the
+new pool's accounting. No legacy users or data-preservation obligation is selected;
+abandoned footprint is unmeasured. This is not cross-build replay/rollback
+qualification. No compile-time paging containment switch remains in this adapter.
 
-### Paging-state admission, packed cursors (AGE-353), and containment
+The new canonical pool has a **512 MiB accounted storage budget**. Each file
+charges logical length rounded to 4 KiB plus a 4 KiB object allowance (empty files
+charge 4 KiB); the maximum object count is 131,072, not a separate allowance for
+large objects. Filesystem failures are distinct I/O errors; admission refuses with
+`session_turn_staging_capacity_exceeded`, not a completed page. These units do not
+bound provider-wide disk, filesystem allocation or RSS.
 
-The canonical `host.data_root/provider-state/codex/session-pages-v1` scope (or
-the existing default data root) has a **512 MiB accounted storage budget**. Each
-file charges its logical length rounded up to 4 KiB, plus a 4 KiB object
-allowance; empty files charge 4 KiB. The corresponding maximum object count is
-131,072 (512 MiB / 4 KiB), not an independent allowance for that many large
-files. This replaces AGE-343's independent 4,096-object ceiling: an inherited
-store of 4,464 ~503-byte cursors charges about 35 MiB, rather than being
-unserviceable solely because of its file count. These are accounting units, not
-a universal filesystem allocation, metadata, provider-wide disk, or process RSS
-guarantee. Actual filesystem failures remain distinct I/O errors; quota refusal
-returns fixed `session_turn_staging_capacity_exceeded`, never a completed page.
-
-New canonical cursors keep the same opaque hash tokens and JSON contents but
-append to 256 fixed hash-prefix buckets (`cursors-xx.pack`), instead of
-allocating one inode per token. Each frame is `sha256`, a space, serialized
-cursor JSON, and a newline. Reads stream bounded frames (32 KiB cursor plus
-framing), checking each complete frame's digest; they scan the selected bucket,
-not all retained cursor contents. Worst-case bucket scan is bounded by the
-storage budget, not the native-source quantum. Bucketing is not a guarantee of
-uniform hash distribution or constant lookup latency. Repeated canonical pages
-consume retained history bytes but at most 256 new cursor objects. New
-observation pages use the separate source-backed strategy below, not this
-retained pool. Prefix files still consume individual charged objects. There is
-no expiry, replay eviction, or reference-based GC: finite retained history can
-eventually exhaust the budget and requires an explicit operator decision. No
-infinite-history serviceability is claimed.
-
-A directory-inode advisory lock serializes complete canonical paging requests
-and legacy/packed observation-token loads across threads, processes, and
-aliases. Source-backed observation requests do not acquire canonical admission.
-Admission rescans actual files with constant accumulation memory; unexpected
-non-file entries fail closed. Never replace or unlink that directory while
-serving requests. No native-history lock is added. New files and pack growth
-reserve their full incremental charge before writing. Prefix files retain
-synchronized temporary-file/rename publication. Pack appends sync the file and
-directory before returning a token. After interruption only an incomplete final
-frame is truncated and synced before a replacement append. Under cooperating
-process interruption that suffix has not supplied an issued token; arbitrary
-disk corruption (such as loss of an issued frame newline) is not covered by that
-crash-recovery guarantee. Complete frames and legacy files are never removed,
-including unreferenced frames. Complete corrupt frames fail closed rather than
-being silently repaired. Temporary/orphan files remain charged on restart. Exact
-byte-validated dedup works even above limits; packed dedup resynchronizes
-publication, including a complete frame left by a writer that exited before
-fsync. Per-record/source/response limits and cursor identity/budget/generation
-checks remain unchanged. Legacy partial-record dependencies are retained and
-resolved unchanged.
-
-**Upgrade and rollback:** no migration, relocation, cleanup, or DB-reference
-scan is needed. Leave every legacy hash-named JSON and `record-*.part` file in
-place. New readers accept legacy JSON and packed `codex-stp1-` tokens, plus
-source-backed `codex-obs1-` observation tokens. Preserve the sibling observation
-authentication key as well as all partial-prefix dependencies. Old binaries can
-still read legacy tokens, but cannot read newly packed tokens and still enforce
-the obsolete object cap. Before enabling the new writer, stop/drain all old
-paging binaries sharing this data root, including in-flight provider operations;
-switch every canonical and observation invocation route to a reader/writer
-supporting all three representations and a host accepting the observation
-accounting extension. Cooperating new processes can run concurrently
-immediately, through the existing directory lock. Mixed old/new paging service
-is **not supported**: unchanged legacy readability is not permission to hand new
-tokens to old readers. Once any packed or source-backed token is issued,
-rollback to an incompatible reader would violate replay obligations. Use a
-forward correction (or containment that retains this reader); do not delete
-packs or revert to an old binary as recovery. Root must verify cutover/fleet
-readiness and the actual stalled observation/delivery separately; fixture replay
-is not receiver evidence.
-
-The compile-time paging switch supports reader-preserving containment; no
-separately verified compatible containment binary is established here. When
-disabled, it returns `session_turn_paging_paused` before any paging read, state-
-directory preparation, staging or cursor mutation. It pauses canonical and user-
-observation **v1 paging**; legacy non-paging reads and unrelated provider
-operations remain unchanged. It is not an old-parser downgrade or full ingestion
-restoration. Forward restoration uses the same state and checkpoint. Canonical
-Runner code keeps fixed capacity/pause terminals stopped across routine re-
-enqueue/import; headless wake recovery is separately owned Runner work, not a
-provider restoration claim; a separately authorized caller must explicitly rearm
-the exact terminal/generation after resolving its cause. Neither code nor tests
-authorize installation, rearming production state, or containment activation.
+Immutable `record-<sha256>.part` prefixes are synchronized before referring
+cursors. Canonical cursors append digest-checked frames to 256 hash-prefix
+`cursors-xx.pack` buckets. A directory-inode lock serializes cooperating canonical
+requests. Pack/prefix growth reserves its incremental charge before writing;
+replay/dedup may succeed above admission limits. Interrupted pack appends truncate
+only an incomplete final frame before a replacement append; complete corruption
+fails closed. No crash guarantee covers arbitrary corruption of an issued frame.
+Unreferenced prefixes, obsolete frames and interrupted/orphan files remain charged;
+there is no expiry, eviction or automatic GC. Extra verification frames can exhaust
+the finite pool. Do not replace/unlink its directory while serving requests or
+remove dependencies of retained new tokens. No native-history lock is added.
 
 ### Capacity-independent user observation (AGE-347)
 
-`user_observation` v1 paging now issues provider-owned `codex-obs1-` tokens.
+`user_observation` v1 paging issues SDK-owned `codex-shared-obs1-` tokens.
 These bounded authenticated cursors carry positions and digests, not message
 bodies. Beginning, empty tail anchors, continuations and resumes do not allocate
 cursor or prefix files, even when unrelated retained canonical staging is full.
@@ -679,8 +622,9 @@ it. The shared SDK session schema permits declared observation accounting up to
 retain the 8,388,608 ceiling and cannot carry the accounting prefix. Undeclared
 observation accounting stays under that same canonical ceiling. A declared
 accounting warning must be unique, use 1–20 digits per category, and contain no
-CR/LF; unrelated warnings may coexist. Codex emits its own accounting categories
-within those shared constraints. JSON Schema does not prove category sums or
+CR/LF; unrelated warnings may coexist. The SDK emits these accounting categories
+within the shared constraints; the historical Codex-named warning is retained
+vocabulary, not a separate provider-local accounting engine. JSON Schema does not prove category sums or
 per-request arithmetic: hosts must enforce both. `contract/UPSTREAM.md` retains
 historical references rather than a second base schema authority. Existing v1
 fields carry the exchange, and hosts must continue treating cursors as opaque. Reconstruction is **native I/O**, never
@@ -691,7 +635,7 @@ can reconstruct/hash the growing prefix repeatedly, so total catch-up work is
 not single-pass or linear in transcript length.
 
 Authentication uses HMAC-SHA256 and one fixed 32-byte random key at the private
-sibling `provider-state/codex/observation-auth-v1/key`. It is outside the
+sibling `provider-state/codex-shared/observation-auth-v1/key`. It is outside the
 canonical admission scope, not an observation cache or a growing storage pool.
 Key initialization holds the directory-inode lock, writes and syncs one private
 `key.preparing` slot, then atomically renames it to `key`. Only bounded, private
@@ -702,9 +646,7 @@ key is never replaced, and file plus directory sync must succeed before tokens
 can be returned, including on retry after rename. A malformed/unsafe published
 key fails with an explicit diagnostic, not implicit rotation: it may be damaged
 issued authority. Unexpected preparation residue is refused, not broadly cleaned.
-Old initializers use the same lock but can still strand a short final key if
-interrupted before all routes drain/cut over; this correction does not repair
-that ambiguous state or guarantee mixed-reader/writer operation. The private
+The private
 provider-owned directory lineage and cooperating lock protocol remain required;
 this is not protection against hostile same-user directory replacement. Preserve
 this key with provider state; a missing key for an existing observation token
@@ -738,15 +680,11 @@ with growth outside the reconstructed range. Snapshot completion still means
 frozen EOF coverage, not delivery acknowledgement or native session completion.
 Runner owns exact-envelope matching, durable settlement and submission fences.
 
-Legacy file-backed and packed `codex-stp1-` observation checkpoints are accepted with their existing
-binding and generation checks, then produce source-backed tokens. Their retained
-staging dependencies are neither deleted nor evicted. Already-issued legacy
-response bytes are not claimed to equal the upgraded response encoding or its
-new accounting; replay within the new implementation is deterministic.
-Canonical packing, allocation admission, prefix files, token encoding and native
-accounting retain the AGE-353 behavior described above. Old binaries cannot consume `codex-obs1-` tokens;
-rollback requires a compatible reader or an explicit bounded reconciliation
-plan, never deletion/reset of retained observation or canonical evidence.
+Private-engine observation checkpoints are refused, not upgraded. New tokens
+bind the new namespace's key; there is no dual decoding or old-pool fallback.
+Preserve that key for any retained new observation tokens. This is source-backed
+synthetic replay behavior, not native recovery, installed pairing or stress
+qualification.
 
 ### Active native notification receipt (AGE-355)
 
@@ -755,10 +693,10 @@ The existing opt-in `session_turn_pages_v1` capability (host selection:
 `session.read_turns` / `user_observation` projection are sufficient to query
 receipt while a native exec is still running. No new operation, marker, wire
 field, native parser in Runner, model call, or permanent observer service is
-needed. This candidate reuses the **active provider-carried contract**, including
-its documented AGE-347 local I/O extension; it does not claim a matching canonical
-SDK snapshot. Canonical SDK alignment remains unresolved future integration,
-not a prerequisite for developing or testing this provider candidate.
+needed. This adapter now consumes the shared SDK paging API and schema, including the
+existing observation I/O declaration. Actual installed host/provider pairing and
+native receipt/lifecycle qualification remain separate; source adoption and fake
+fixtures do not establish either.
 
 Receipt here means one exact canonical notification envelope newly observed as
 user input in the bound trusted native history, within a completed finite
@@ -824,8 +762,8 @@ Root owns scheduling, ACK/lifecycle races and rollout pairing. Do not promote
 persisted match counts from an older provider's more permissive projection as
 newly qualified evidence: unresolved attempts needing these exclusions must be
 reobserved from their **original** anchor under one selected provider revision,
-without resubmission or replacing that anchor. Old token mechanics remain
-readable, but cached page interpretations are not retroactively requalified.
+without resubmission or replacing that anchor. Old private tokens are refused; cached page interpretations are not
+retroactively requalified.
 PTY native-ACK expansion and native response-progress correlation remain future
 work; current PTY transport/drain ACK and old prompt-submission markers keep their
 existing meaning.

@@ -149,7 +149,7 @@ impl ResidentTurns for CodexTurns {
         events: &mut dyn Write,
     ) -> Result<i32, TurnFailure> {
         let classify = |failure: ProviderFailure| TurnFailure {
-            kind: match failure.code {
+            kind: match failure.code.as_str() {
                 "launch_cancelled" => TurnFailureKind::Cancelled,
                 "launch_reconciliation_required" => TurnFailureKind::ReconciliationRequired,
                 _ => TurnFailureKind::Failed,

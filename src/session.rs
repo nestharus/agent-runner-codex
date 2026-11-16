@@ -124,7 +124,7 @@ fn invalid(request: &RequestEnvelope, message: &str) -> ProviderFailure {
     ProviderFailure::invalid_request(&request.request_id, "invalid_session_params", message)
 }
 
-fn io_failure(request: &RequestEnvelope) -> ProviderFailure {
+pub(crate) fn io_failure(request: &RequestEnvelope) -> ProviderFailure {
     ProviderFailure::internal(
         &request.request_id,
         "codex_rollout_io",
@@ -132,7 +132,7 @@ fn io_failure(request: &RequestEnvelope) -> ProviderFailure {
     )
 }
 
-fn corrupt(request: &RequestEnvelope) -> ProviderFailure {
+pub(crate) fn corrupt(request: &RequestEnvelope) -> ProviderFailure {
     ProviderFailure::internal(
         &request.request_id,
         "codex_rollout_invalid",
@@ -140,7 +140,7 @@ fn corrupt(request: &RequestEnvelope) -> ProviderFailure {
     )
 }
 
-fn not_found(request: &RequestEnvelope) -> ProviderFailure {
+pub(crate) fn not_found(request: &RequestEnvelope) -> ProviderFailure {
     ProviderFailure::invalid_request(
         &request.request_id,
         "codex_session_not_found",
@@ -164,7 +164,10 @@ fn validate_session_id(id: &str, request: &RequestEnvelope) -> Result<(), Provid
     Ok(())
 }
 
-fn rollout_paths(root: &Path, request: &RequestEnvelope) -> Result<Vec<PathBuf>, ProviderFailure> {
+pub(crate) fn rollout_paths(
+    root: &Path,
+    request: &RequestEnvelope,
+) -> Result<Vec<PathBuf>, ProviderFailure> {
     let mut paths = Vec::new();
     let mut pending = vec![root.join("sessions"), root.join("archived_sessions")];
     let mut visited = 0;
@@ -302,107 +305,13 @@ pub(crate) fn locate(
     Ok(found)
 }
 
-pub(crate) fn file_identity(metadata: &fs::Metadata) -> (u64, u64) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.dev(), metadata.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        (0, 0)
-    }
-}
-
-/// Native filenames select initial candidates; their first metadata record still
-/// owns identity. Nonstandard/fork filenames use a bounded metadata fallback.
-/// An authenticated checkpoint already owns a source device/inode: select that
-/// file before reading headers, independent of unrelated session populations.
-pub(crate) fn locate_page_source(
-    root: &Path,
-    id: &str,
-    maximum: usize,
-    source_identity: Option<(u64, u64)>,
+// A source's first native record owns identity; later fork metadata does not.
+pub(crate) fn page_session_id(
+    bytes: &[u8],
     request: &RequestEnvelope,
-) -> Result<(File, usize, u64), ProviderFailure> {
-    let paths = rollout_paths(root, request)?;
-    let suffix = format!("-{id}.jsonl");
-    let named: Vec<_> = paths
-        .iter()
-        .filter(|p| {
-            p.file_name()
-                .is_some_and(|n| n.to_string_lossy().ends_with(&suffix))
-        })
-        .collect();
-    let candidates: Vec<_> = if source_identity.is_some() || named.is_empty() {
-        paths.iter().collect()
-    } else {
-        named
-    };
-    let mut examined = 0;
-    let mut found = None;
-    for path in candidates {
-        if let Some(identity) = source_identity {
-            // Filesystem metadata is not a native transcript read. Never open
-            // unrelated headers just to rediscover an already-bound source.
-            let metadata = fs::symlink_metadata(path).map_err(|_| io_failure(request))?;
-            if !metadata.is_file() || file_identity(&metadata) != identity {
-                continue;
-            }
-        }
-        let file = File::open(path).map_err(|_| io_failure(request))?;
-        if source_identity.is_some_and(|identity| {
-            file.metadata().map(|m| file_identity(&m)).ok() != Some(identity)
-        }) {
-            return Err(io_failure(request));
-        }
-        let remaining = maximum.saturating_sub(examined);
-        if remaining == 0 {
-            return Err(ProviderFailure::invalid_request(
-                &request.request_id,
-                "session_turn_page_budget_too_small",
-                "Source budget cannot admit rollout identity metadata",
-            ));
-        }
-        // Identity discovery must not prefetch uncharged native bytes. A
-        // one-byte buffer trades header syscalls for exact source accounting;
-        // the loop remains bounded by this request's remaining source quota.
-        let mut reader = BufReader::with_capacity(1, file.take(remaining as u64));
-        let mut first = Vec::new();
-        reader
-            .read_until(b'\n', &mut first)
-            .map_err(|_| io_failure(request))?;
-        examined += first.len();
-        if !first.ends_with(b"\n") {
-            return Err(ProviderFailure::invalid_request(
-                &request.request_id,
-                "session_turn_page_budget_too_small",
-                "Source budget cannot admit the complete rollout identity record",
-            ));
-        }
-        let meta = serde_json::from_slice::<Value>(&first)
-            .map_err(|_| corrupt(request))
-            .and_then(|v| parse_meta(&v, request))?;
-        if meta.id == id {
-            if found.is_some() {
-                return Err(ProviderFailure::conflict(
-                    &request.request_id,
-                    "codex_session_ambiguous",
-                    "More than one native rollout claims this session",
-                    json!({}),
-                ));
-            }
-            found = Some((reader.into_inner().into_inner(), first.len() as u64));
-            // The authenticated physical source is unambiguous even if it has
-            // another hard-link name. Initial discovery still checks all claims.
-            if source_identity.is_some() {
-                break;
-            }
-        }
-    }
-    found
-        .map(|(file, offset)| (file, examined, offset))
-        .ok_or_else(|| not_found(request))
+) -> Result<String, ProviderFailure> {
+    let value = serde_json::from_slice(bytes).map_err(|_| corrupt(request))?;
+    parse_meta(&value, request).map(|meta| meta.id)
 }
 
 fn timestamp_ms(value: Option<&str>) -> Option<u64> {

@@ -392,7 +392,10 @@ fn age343_remaining_quantum_and_record_ceiling_neighbors() {
         append_raw(&f, padded_record("compacted", size).as_bytes());
         f.append("user", "eligible");
         let original = fs::read(&f.path).unwrap();
-        let (turns, _) = bounded_drain(&f, &f.params(), 12);
+        // U558 D2 accepts full-prefix verification catch-up cost for this
+        // exact <=8 MiB / 1 MiB fixture. This replaces the historical 12-page
+        // termination guard, not the content, replay or per-page oracles.
+        let (turns, _) = bounded_drain(&f, &f.params(), 64);
         assert_eq!(turns.len(), 1, "record size {size}");
         assert_eq!(turns[0]["turn_id"], format!("{ID}:byte:{}", 22_030 + size));
         assert_eq!(fs::read(&f.path).unwrap(), original);
@@ -430,36 +433,146 @@ fn age343_projected_multiquantum_body_keeps_exact_digests_and_order() {
     assert_eq!(turns[0]["turn_id"], format!("{ID}:byte:22030"));
 }
 
+// These traversals accept charged verification pages, not weaker outcomes.
+// U562 fixes the termination bounds before execution: 64 at 1 MiB, 128 at
+// 512 bytes. Keep the original large-body/16 and neighbor/64 controls separate.
+fn checked_traversal_page(
+    f: &Fixture,
+    request: &Value,
+    page: &Value,
+    validator: &agent_provider_contract::SchemaRegistry,
+    branch: &str,
+) {
+    assert_eq!(page, &f.read(request.clone()), "replay: {branch}");
+    assert_page_schema(validator, page);
+    assert_eq!(
+        page["page_turn_count"],
+        page["turns"].as_array().unwrap().len()
+    );
+    let budget = request["max_source_bytes"].as_u64().unwrap();
+    if request["turn_projection"] == "user_observation" {
+        observation_io(page, budget as usize, header_len(f));
+    } else {
+        assert!(
+            page["source_bytes_examined"].as_u64().unwrap() <= budget,
+            "{branch}"
+        );
+    }
+    assert!(
+        serde_json::to_vec(&success_response("page-test", page.clone()))
+            .unwrap()
+            .len()
+            + 1
+            <= request["max_response_bytes"].as_u64().unwrap() as usize,
+        "response bound: {branch}"
+    );
+    if page["snapshot_complete"] == true {
+        assert!(page["next_page_token"].is_null(), "{branch}");
+        assert!(page["resume_token"].is_string(), "{branch}");
+    } else {
+        assert!(page["resume_token"].is_null(), "{branch}");
+        assert!(page["next_page_token"].is_string(), "{branch}");
+        assert_ne!(page["next_page_token"], request["page_token"], "{branch}");
+        assert_ne!(page["next_page_token"], request["after_token"], "{branch}");
+        if page["page_turn_count"] == 0 {
+            assert_eq!(page["scan_progress"], true, "empty progress: {branch}");
+            assert!(
+                page["source_bytes_examined"].as_u64().unwrap() > 0,
+                "{branch}"
+            );
+        }
+    }
+}
+
+fn checked_traversal_position(previous: &Value, page: &Value, branch: &str) {
+    assert_eq!(page["snapshot_id"], previous["snapshot_id"], "{branch}");
+    assert_eq!(
+        page["page_index"],
+        previous["page_index"].as_u64().unwrap() + 1,
+        "{branch}"
+    );
+    assert_eq!(
+        page["page_start_sequence"],
+        previous["page_start_sequence"].as_u64().unwrap()
+            + previous["page_turn_count"].as_u64().unwrap(),
+        "sequence: {branch}"
+    );
+}
+
+fn checked_verification_drain(
+    f: &Fixture,
+    p: &Value,
+    limit: usize,
+    validator: &agent_provider_contract::SchemaRegistry,
+    branch: &str,
+) -> (Vec<Value>, Value) {
+    let mut request = p.clone();
+    let mut turns = Vec::new();
+    let mut previous = None;
+    let mut charged = 0;
+    for calls in 1..=limit {
+        let page = f.read(request.clone());
+        checked_traversal_page(f, &request, &page, validator, branch);
+        if let Some(previous) = &previous {
+            checked_traversal_position(previous, &page, branch);
+        }
+        charged += page["source_bytes_examined"].as_u64().unwrap();
+        turns.extend(page["turns"].as_array().unwrap().iter().cloned());
+        if page["snapshot_complete"] == true {
+            eprintln!("verification traversal: branch={branch}; calls={calls}; replay_calls={calls}; declared_source_bytes={charged}; complete=true");
+            return (turns, page);
+        }
+        request = f.continuation(p, &page);
+        previous = Some(page);
+    }
+    panic!("verification traversal exceeded {limit} calls: {branch}");
+}
+
+fn checked_verification_refusal(f: &Fixture, expected_code: &str, branch: &str) {
+    let original = fs::read(&f.path).unwrap();
+    let validator = paging_result_schema();
+    let p = f.params();
+    let mut request = p.clone();
+    let mut previous = None;
+    let mut charged = 0;
+    for calls in 1..=64 {
+        match session::handle("session.read_turns", &f.request(request.clone())) {
+            Ok(page) => {
+                checked_traversal_page(f, &request, &page, &validator, branch);
+                if let Some(previous) = &previous {
+                    checked_traversal_position(previous, &page, branch);
+                }
+                // Neither a parse failure nor a ceiling is an eligible skip.
+                assert_eq!(page["snapshot_complete"], false, "{branch}");
+                assert_eq!(page["turns"], json!([]), "{branch}");
+                assert_eq!(page["page_start_sequence"], 0, "{branch}");
+                charged += page["source_bytes_examined"].as_u64().unwrap();
+                request = f.continuation(&p, &page);
+                previous = Some(page);
+            }
+            Err(error) => {
+                assert!(previous.is_some(), "fixture must visit progress: {branch}");
+                assert_eq!(error.code, expected_code, "{branch}");
+                assert!(!error.retryable, "{branch}");
+                let replay =
+                    session::handle("session.read_turns", &f.request(request)).unwrap_err();
+                assert_eq!(replay.code, error.code, "{branch}");
+                assert!(!replay.retryable, "{branch}");
+                assert_eq!(fs::read(&f.path).unwrap(), original, "{branch}");
+                eprintln!("verification outcome: branch={branch}; calls={calls}; replay_calls={calls}; successful_page_declared_source_bytes={charged}; error={expected_code}; deterministic_nonretryable=true; no_skip=true; native_unchanged=true");
+                return;
+            }
+        }
+    }
+    panic!("verification refusal exceeded 64 calls: {branch}");
+}
+
 #[test]
 fn age343_unsupported_ceiling_is_bounded_and_never_skips_to_following_turn() {
     let f = Fixture::new();
     append_raw(&f, padded_record("compacted", 8_388_609).as_bytes());
     f.append("user", "must not be silently reached");
-    let p = f.params();
-    let mut request = p.clone();
-    let mut stopped = false;
-    for _ in 0..12 {
-        match session::handle("session.read_turns", &f.request(request.clone())) {
-            Ok(page) => {
-                assert_eq!(page["snapshot_complete"], false);
-                assert_eq!(page["turns"], json!([]));
-                request = f.continuation(&p, &page);
-            }
-            Err(error) => {
-                assert_eq!(error.code, "session_turn_record_ceiling_exceeded");
-                assert!(!error.retryable);
-                assert_eq!(
-                    session::handle("session.read_turns", &f.request(request))
-                        .unwrap_err()
-                        .code,
-                    error.code
-                );
-                stopped = true;
-                break;
-            }
-        }
-    }
-    assert!(stopped);
+    checked_verification_refusal(&f, "session_turn_record_ceiling_exceeded", "ceiling/1MiB");
 }
 
 #[test]
@@ -467,19 +580,43 @@ fn age343_multiquantum_partial_eof_resumes_after_append_without_losing_prefix() 
     let f = Fixture::new();
     let record = padded_record("compacted", 2_500_000);
     append_raw(&f, &record.as_bytes()[..2_000_000]);
+    let original = fs::read(&f.path).unwrap();
+    let validator = paging_result_schema();
     let p = f.params();
-    let (turns, end) = bounded_drain(&f, &p, 6);
+    let (turns, end) = checked_verification_drain(&f, &p, 64, &validator, "partialEOF/initial");
     assert!(turns.is_empty());
+    assert_eq!(fs::read(&f.path).unwrap(), original);
     let mut resumed = p.clone();
     resumed["after_token"] = end["resume_token"].clone();
-    let still_partial = f.read(resumed.clone());
+    // Completing an unchanged partial-EOF snapshot may first verify its prefix.
+    let (turns, still_partial) =
+        checked_verification_drain(&f, &resumed, 64, &validator, "partialEOF/unchanged-resume");
+    assert!(turns.is_empty());
     assert_eq!(still_partial["snapshot_complete"], true);
     assert_eq!(still_partial["turns"], json!([]));
+    assert_eq!(fs::read(&f.path).unwrap(), original);
     append_raw(&f, &record.as_bytes()[2_000_000..]);
     f.append("user", "appended");
-    let (turns, _) = bounded_drain(&f, &resumed, 6);
+    let appended = fs::read(&f.path).unwrap();
+    assert!(appended.starts_with(&original));
+    assert_eq!(
+        &appended[original.len()..original.len() + 500_000],
+        &record.as_bytes()[2_000_000..]
+    );
+    let (turns, _) = checked_verification_drain(&f, &resumed, 64, &validator, "partialEOF/append");
     assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0]["turn_id"],
+        format!("{ID}:byte:{}", original.len() + 500_000)
+    );
+    assert_eq!(turns[0]["role"], "user");
     assert_eq!(turns[0]["body"][0]["text"], "appended");
+    let body = serde_json::to_vec(&json!([{"type":"text","text":"appended"}])).unwrap();
+    assert_eq!(turns[0]["body_bytes"], body.len());
+    assert_eq!(turns[0]["body_sha256"], sha256_hex(&body));
+    assert_eq!(turns[0]["canonical_text_sha256"], sha256_hex(b"appended"));
+    assert_eq!(fs::read(&f.path).unwrap(), appended);
+    eprintln!("verification outcome: branch=partialEOF; unchanged_empty_complete=true; retained_prefix=true; appended_body_digest_order=true; native_unchanged=true");
 }
 
 #[test]
@@ -487,13 +624,7 @@ fn age343_malformed_complete_record_is_not_a_nonmessage_skip() {
     let f = Fixture::new();
     append_raw(&f, format!("{}!\n", " ".repeat(1_100_000)).as_bytes());
     f.append("user", "must not be reached");
-    let p = f.params();
-    let first = f.read(p.clone());
-    assert_eq!(first["snapshot_complete"], false);
-    assert_eq!(first["scan_progress"], true);
-    let request = f.continuation(&p, &first);
-    let error = session::handle("session.read_turns", &f.request(request)).unwrap_err();
-    assert_eq!(error.code, "invalid_session_read_turns_params");
+    checked_verification_refusal(&f, "invalid_session_read_turns_params", "malformed/1MiB");
 }
 
 #[test]
@@ -551,12 +682,12 @@ fn age343_staged_prefix_preserves_identity_generation_and_integrity_fences() {
                 let root = f
                     .root
                     .path()
-                    .join("state/provider-state/codex/session-pages-v1");
+                    .join("state/provider-state/codex-shared/session-pages-v1");
                 let path = if mutation == "cursor_digest" {
                     let token = first["next_page_token"]
                         .as_str()
                         .unwrap()
-                        .strip_prefix("codex-stp1-")
+                        .strip_prefix("codex-shared-stp2-")
                         .unwrap();
                     root.join(format!("cursors-{}.pack", &token[..2]))
                 } else {
@@ -632,62 +763,36 @@ fn age343_canonical_backfill_does_not_change_native_resume_argv_authority() {
 }
 
 #[test]
-fn age343_legacy_cursor_without_staging_fields_resumes_at_exact_record_boundary() {
+fn retired_private_canonical_tokens_are_refused_without_migration() {
     let f = Fixture::new();
-    exact_metadata(&f, 22_030);
-    for _ in 0..18 {
-        f.append("user", "prefix");
-    }
-    let boundary = fs::metadata(&f.path).unwrap().len();
-    append_raw(&f, padded_record("compacted", 1_036_666).as_bytes());
-    f.append("user", "after legacy checkpoint");
+    f.append("user", "retained");
     let mut p = f.params();
-    p["max_turns"] = json!(6);
+    p["max_turns"] = json!(1);
+    f.append("assistant", "following");
     let page = f.read(p.clone());
-    let root = f
+    assert!(page["next_page_token"]
+        .as_str()
+        .unwrap()
+        .starts_with("codex-shared-stp2-"));
+    let private = f
         .root
         .path()
         .join("state/provider-state/codex/session-pages-v1");
-    let token = page["next_page_token"]
-        .as_str()
-        .unwrap()
-        .strip_prefix("codex-stp1-")
-        .unwrap();
-    // Manufacture an OLD-schema checkpoint in this synthetic fixture only.
-    // No provider-state, DB or cursor from the real incident is read or changed.
-    let mut legacy: Value = serde_json::from_slice(
-        fs::read(root.join(format!("cursors-{}.pack", &token[..2])))
-            .unwrap()
-            .split(|b| *b == b'\n')
-            .find(|line| line.starts_with(token.as_bytes()))
-            .unwrap()
-            .get(65..)
-            .unwrap(),
-    )
-    .unwrap();
-    legacy.as_object_mut().unwrap().remove("partial_record");
-    legacy["offset"] = json!(boundary);
-    legacy["page"] = json!(3);
-    legacy["sequence"] = json!(18);
-    let bytes = serde_json::to_vec(&legacy).unwrap();
-    let digest = sha256_hex(&bytes);
-    fs::write(root.join(format!("{digest}.json")), bytes).unwrap();
+    fs::create_dir_all(&private).unwrap();
+    let bytes = br#"{"offset":0,"partial_record":null}"#;
+    let digest = sha256_hex(bytes);
+    let legacy = private.join(format!("{digest}.json"));
+    fs::write(&legacy, bytes).unwrap();
     let mut request = f.continuation(&p, &page);
     request["page_token"] = json!(format!("codex-stp1-{digest}"));
-    let first = f.read(request.clone());
-    assert_eq!(first, f.read(request));
-    assert_eq!(first["page_index"], 3);
-    assert_eq!(first["page_start_sequence"], 18);
-    assert_eq!(first["source_bytes_examined"], 1_048_576);
-    assert_eq!(first["snapshot_complete"], false);
-    assert_eq!(first["scan_progress"], true);
-    let next = f.read(f.continuation(&p, &first));
-    assert_eq!(next["page_start_sequence"], 18);
     assert_eq!(
-        next["turns"][0]["body"][0]["text"],
-        "after legacy checkpoint"
+        session::handle("session.read_turns", &f.request(request))
+            .unwrap_err()
+            .code,
+        "session_turn_page_token_stale"
     );
-    assert_eq!(next["snapshot_complete"], true);
+    assert_eq!(fs::read(&legacy).unwrap(), bytes);
+    assert_eq!(f.read(p), page);
 }
 
 fn observation_params(f: &Fixture) -> Value {
@@ -702,7 +807,7 @@ fn observation_params(f: &Fixture) -> Value {
 fn staging_root(f: &Fixture) -> PathBuf {
     f.root
         .path()
-        .join("state/provider-state/codex/session-pages-v1")
+        .join("state/provider-state/codex-shared/session-pages-v1")
 }
 
 fn exhaust_staging(f: &Fixture) -> PathBuf {
@@ -800,7 +905,7 @@ fn age347_exhausted_staging_tail_beginning_continuation_and_canonical_preservati
     assert!(tail["resume_token"]
         .as_str()
         .unwrap()
-        .starts_with("codex-obs1-"));
+        .starts_with("codex-shared-obs1-"));
     assert_eq!(original, fs::read(&f.path).unwrap());
     f.append(
         "user",
@@ -1190,121 +1295,65 @@ fn age347_observation_concurrent_start_uses_one_durable_key_no_staging_admission
 }
 
 #[test]
-fn combined_legacy_and_packed_observation_prefix_upgrade_preserves_snapshot_and_dependencies() {
-    for packed in [false, true] {
-        let f = Fixture::new();
-        let text = "x".repeat(1200);
-        f.append("user", &text);
-        let mut canonical = f.params();
-        canonical["max_source_bytes"] = json!(512);
-        canonical["max_response_bytes"] = json!(524_288);
-        let first = f.read(canonical.clone());
-        let digest = first["next_page_token"]
-            .as_str()
-            .unwrap()
-            .strip_prefix("codex-stp1-")
-            .unwrap();
-        let pack =
-            fs::read(staging_root(&f).join(format!("cursors-{}.pack", &digest[..2]))).unwrap();
-        let mut legacy: Value = serde_json::from_slice(
-            pack.split(|b| *b == b'\n')
-                .find(|line| line.starts_with(digest.as_bytes()))
-                .unwrap()
-                .get(65..)
-                .unwrap(),
-        )
-        .unwrap();
-        legacy["binding"]["projection"] = json!("user_observation");
-        legacy["binding"]["nonce"] = json!("a".repeat(64));
-        let bytes = serde_json::to_vec(&legacy).unwrap();
-        let digest = sha256_hex(&bytes);
-        let path = if packed {
-            let path = staging_root(&f).join(format!("cursors-{}.pack", &digest[..2]));
-            let mut out = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .unwrap();
-            writeln!(
-                out,
-                "{digest} {}",
-                String::from_utf8(bytes.clone()).unwrap()
-            )
-            .unwrap();
-            path
-        } else {
-            let path = staging_root(&f).join(format!("{digest}.json"));
-            fs::write(&path, &bytes).unwrap();
-            path
-        };
-        let retained: Vec<_> = fs::read_dir(staging_root(&f))
-            .unwrap()
-            .map(|entry| {
-                let path = entry.unwrap().path();
-                let bytes = fs::read(&path).unwrap();
-                (path, bytes)
-            })
-            .collect();
-        exhaust_staging(&f);
-        // Canonical packed replay survives at cap; a new partial dependency
-        // cannot be admitted, so success below is not spare canonical capacity.
-        assert_eq!(f.read(canonical.clone()), first);
-        let blocked = f.continuation(&canonical, &first);
-        assert_eq!(
-            session::handle("session.read_turns", &f.request(blocked))
-                .unwrap_err()
-                .code,
-            "session_turn_staging_capacity_exceeded"
-        );
-        let p = observation_params(&f);
-        let mut request = f.continuation(&p, &first);
-        request["page_token"] = json!(format!("codex-stp1-{digest}"));
-        let page = f.read(request.clone());
-        assert_eq!(page, observation_subprocess(&f, &request));
-        assert!(page["next_page_token"]
-            .as_str()
-            .unwrap()
-            .starts_with("codex-obs1-"));
-        assert_eq!(
-            observation_io(&page, 512, header_len(&f)).1,
-            512 - header_len(&f)
-        );
-        // Appending cannot extend the issued continuation's frozen snapshot.
-        f.append("user", "after frozen snapshot");
-        assert_eq!(page, f.read(request.clone()));
-        let mut wrong_nonce = request.clone();
-        wrong_nonce["expected_delivery_nonce"] = json!("b".repeat(64));
-        assert_eq!(
-            session::handle("session.read_turns", &f.request(wrong_nonce))
-                .unwrap_err()
-                .code,
-            "session_turn_page_token_stale"
-        );
-        let mut current = page;
-        let mut turns = Vec::new();
-        for _ in 0..8 {
-            observation_io(&current, 512, header_len(&f));
-            turns.extend(current["turns"].as_array().unwrap().iter().cloned());
-            if current["snapshot_complete"] == true {
-                break;
-            }
-            current = f.read(f.continuation(&p, &current));
+fn retired_private_observation_tokens_are_refused_and_new_snapshot_dependencies_replay() {
+    let f = Fixture::new();
+    let text = "x".repeat(1200);
+    f.append("user", &text);
+    let p = observation_params(&f);
+    let first = f.read(p.clone());
+    assert!(first["next_page_token"]
+        .as_str()
+        .unwrap()
+        .starts_with("codex-shared-obs1-"));
+    let mut old_request = f.continuation(&p, &first);
+    old_request["page_token"] = json!(first["next_page_token"].as_str().unwrap().replacen(
+        "codex-shared-obs1-",
+        "codex-obs1-",
+        1
+    ));
+    assert_eq!(
+        session::handle("session.read_turns", &f.request(old_request))
+            .unwrap_err()
+            .code,
+        "session_turn_page_token_stale"
+    );
+    let request = f.continuation(&p, &first);
+    let page = f.read(request.clone());
+    assert_eq!(page, observation_subprocess(&f, &request));
+    assert_eq!(
+        observation_io(&page, 512, header_len(&f)).1,
+        512 - header_len(&f)
+    );
+    f.append("user", "after frozen snapshot");
+    assert_eq!(page, f.read(request.clone()));
+    let mut wrong_nonce = request;
+    wrong_nonce["expected_delivery_nonce"] = json!("b".repeat(64));
+    assert_eq!(
+        session::handle("session.read_turns", &f.request(wrong_nonce))
+            .unwrap_err()
+            .code,
+        "session_turn_page_token_stale"
+    );
+    let mut current = page;
+    let mut turns = Vec::new();
+    for _ in 0..8 {
+        observation_io(&current, 512, header_len(&f));
+        turns.extend(current["turns"].as_array().unwrap().iter().cloned());
+        if current["snapshot_complete"] == true {
+            break;
         }
-        assert_eq!(current["snapshot_complete"], true);
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0]["body"][0]["text"], text);
-        let mut resume = p.clone();
-        resume["after_token"] = current["resume_token"].clone();
-        let appended = f.read(resume);
-        assert_eq!(
-            appended["turns"][0]["body"][0]["text"],
-            "after frozen snapshot"
-        );
-        assert!(path.exists());
-        for (path, bytes) in retained {
-            assert_eq!(fs::read(path).unwrap(), bytes);
-        }
+        current = f.read(f.continuation(&p, &current));
     }
+    assert_eq!(current["snapshot_complete"], true);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["body"][0]["text"], text);
+    let mut resume = p.clone();
+    resume["after_token"] = current["resume_token"].clone();
+    let appended = f.read(resume);
+    assert_eq!(
+        appended["turns"][0]["body"][0]["text"],
+        "after frozen snapshot"
+    );
 }
 
 #[test]
@@ -1459,6 +1508,7 @@ fn observation_result_contract_preserves_projection_specific_native_limits() {
 
 #[test]
 fn continuation_replay_ignores_unrelated_rollout_discovery_for_both_projections() {
+    let validator = paging_result_schema();
     for observation in [true, false] {
         for fallback in [false, true] {
             let mut f = Fixture::new();
@@ -1479,9 +1529,18 @@ fn continuation_replay_ignores_unrelated_rollout_discovery_for_both_projections(
                 f.params()
             };
             p["max_source_bytes"] = json!(512);
+            let branch = format!(
+                "unrelated/projection={}/filename={}",
+                p["turn_projection"].as_str().unwrap(),
+                if fallback { "fallback" } else { "native" }
+            );
+            eprintln!("verification branch selected: {branch}; source_budget=512; user_chars=1800; max_drain_calls=128");
             let first = f.read(p.clone());
+            checked_traversal_page(&f, &p, &first, &validator, &branch);
             let request = f.continuation(&p, &first);
             let before = f.read(request.clone());
+            checked_traversal_page(&f, &request, &before, &validator, &branch);
+            checked_traversal_position(&first, &before, &branch);
             let key = if observation {
                 Some(
                     fs::read(
@@ -1498,6 +1557,7 @@ fn continuation_replay_ignores_unrelated_rollout_discovery_for_both_projections(
             let unrelated = f.path.parent().unwrap().join("rollout-unrelated.jsonl");
             fs::write(&unrelated, format!("{}\n", json!({"type":"session_meta","payload":{"id":"unrelated-session","cwd":"/other"}}))).unwrap();
             let after = f.read(request.clone());
+            checked_traversal_page(&f, &request, &after, &validator, &branch);
             assert!(before == after, "same continuation must survive unrelated discovery: observation={observation}, fallback={fallback}");
             if observation {
                 assert_eq!(
@@ -1506,8 +1566,8 @@ fn continuation_replay_ignores_unrelated_rollout_discovery_for_both_projections(
                 );
                 assert!(after == observation_subprocess(&f, &request));
                 assert_eq!(
-                    key.unwrap(),
-                    fs::read(
+                    key.as_ref().unwrap(),
+                    &fs::read(
                         staging_root(&f)
                             .parent()
                             .unwrap()
@@ -1523,21 +1583,33 @@ fn continuation_replay_ignores_unrelated_rollout_discovery_for_both_projections(
             fs::write(&unrelated, format!("{}\n", json!({"type":"session_meta","payload":{"id":"unrelated-session","padding":"z".repeat(1000)}}))).unwrap();
             assert!(before == f.read(request.clone()));
             assert_eq!(original, fs::read(&f.path).unwrap());
-            let mut seen = Vec::new();
-            let mut request = request;
-            let mut complete = false;
-            for _ in 0..10 {
-                let page = f.read(request);
-                seen.extend(page["turns"].as_array().unwrap().iter().cloned());
-                if page["snapshot_complete"] == true {
-                    complete = true;
-                    break;
-                }
-                request = f.continuation(&p, &page);
-            }
-            assert!(complete);
+            let (seen, _) = checked_verification_drain(&f, &request, 128, &validator, &branch);
             assert_eq!(seen.len(), 1);
             assert_eq!(seen[0]["body"][0]["text"], "x".repeat(1800));
+            assert_eq!(seen[0]["role"], "user");
+            assert_eq!(seen[0]["turn_id"], format!("{ID}:byte:{}", header_len(&f)));
+            let body =
+                serde_json::to_vec(&json!([{"type":"text","text":"x".repeat(1800)}])).unwrap();
+            assert_eq!(seen[0]["body_bytes"], body.len());
+            assert_eq!(seen[0]["body_sha256"], sha256_hex(&body));
+            assert_eq!(
+                seen[0]["canonical_text_sha256"],
+                sha256_hex("x".repeat(1800).as_bytes())
+            );
+            assert_eq!(original, fs::read(&f.path).unwrap());
+            if let Some(key) = key {
+                assert_eq!(
+                    key,
+                    fs::read(
+                        staging_root(&f)
+                            .parent()
+                            .unwrap()
+                            .join("observation-auth-v1/key")
+                    )
+                    .unwrap()
+                );
+            }
+            eprintln!("verification outcome: branch={branch}; exact_body_digests_order=true; bound_source_replay_io_key=true; native_unchanged=true");
         }
     }
 }
